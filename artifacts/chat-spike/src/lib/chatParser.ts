@@ -259,6 +259,27 @@ export function parseChat(raw: string): ChatMessage[] {
   return parseTextChat(raw);
 }
 
+// ─── Build from API (Twitch / Kick) ─────────────────────────────────────────
+export interface RawApiMessage {
+  timestamp: number; // seconds from stream start
+  user: string;
+  text: string;
+}
+
+export function buildMessagesFromApi(raw: RawApiMessage[]): ChatMessage[] {
+  if (raw.length === 0) return [];
+  // Timestamps from the Twitch/Kick APIs are already offset from VOD start.
+  return raw
+    .map((m) => ({
+      timestamp: m.timestamp,
+      wallClockTime: "",
+      user: m.user,
+      text: m.text,
+      raw: m.text,
+    }))
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
+
 // ─── Rolling baseline ────────────────────────────────────────────────────────
 function rollingMean(values: number[], halfWindow: number): number[] {
   const n = values.length;
