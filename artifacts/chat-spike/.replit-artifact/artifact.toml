@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Stream Chat Spike Analyzer"
+version = "1.0.0"
+id = "artifacts/chat-spike"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22290
+
+[services.development]
+run = "pnpm --filter @workspace/chat-spike run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/chat-spike", "run", "build" ]
+publicDir = "artifacts/chat-spike/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22290"
+BASE_PATH = "/"
