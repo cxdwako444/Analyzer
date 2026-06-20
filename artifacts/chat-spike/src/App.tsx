@@ -1,8 +1,9 @@
 import { useState, useCallback } from "react";
-import { BarChart2, MessageSquare, Settings2 } from "lucide-react";
+import { BarChart2, MessageSquare, Settings2, Flame, Activity } from "lucide-react";
 import ChatInput from "./components/ChatInput";
 import ActivityChart from "./components/ActivityChart";
 import SpikeList from "./components/SpikeList";
+import ViralMoments from "./components/ViralMoments";
 import { parseChat, analyzeChat } from "./lib/chatParser";
 import type { AnalysisResult } from "./lib/chatParser";
 
@@ -17,6 +18,8 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+type Tab = "timeline" | "virality";
+
 export default function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [keywords, setKeywords] = useState("");
@@ -24,18 +27,20 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastText, setLastText] = useState<string>("");
+  const [activeTab, setActiveTab] = useState<Tab>("timeline");
 
   const handleAnalyze = useCallback(
     (text: string) => {
       setIsAnalyzing(true);
       setError(null);
       setLastText(text);
+      // Use setTimeout so UI can show loading state before heavy work
       setTimeout(() => {
         try {
           const messages = parseChat(text);
           if (messages.length === 0) {
             setError(
-              "No messages with recognizable timestamps were found. Check the format — each line should start with a timestamp like [00:01:23], (1:23:45), or HH:MM:SS."
+              "No messages with recognizable timestamps found. For CSV exports: make sure the file has 'Date', 'Messages', and 'User' columns with timestamps like '2026-06-18 19:20:28'. For text logs: each line should start with a timestamp like [00:01:23] or HH:MM:SS."
             );
             setResult(null);
           } else {
@@ -86,6 +91,9 @@ export default function App() {
             <div className="flex items-center gap-2">
               <MessageSquare size={15} className="text-white/40" />
               <h2 className="text-sm font-semibold text-white/70">Chat Log</h2>
+              <span className="ml-auto text-xs text-white/25 font-mono">
+                CSV (Date/Messages/User) or plain text
+              </span>
             </div>
             <ChatInput onAnalyze={handleAnalyze} isAnalyzing={isAnalyzing} />
           </div>
@@ -97,7 +105,6 @@ export default function App() {
               <h2 className="text-sm font-semibold text-white/70">Options</h2>
             </div>
 
-            {/* Keywords */}
             <div className="flex flex-col gap-2">
               <label className="text-xs text-white/50 uppercase tracking-wider">
                 Keyword tracking
@@ -110,11 +117,10 @@ export default function App() {
                 className="w-full rounded-lg bg-white/[0.04] border border-white/10 text-sm text-white/80 placeholder-white/20 px-3 py-2.5 focus:outline-none focus:border-violet-500/40 focus:bg-white/[0.06] transition-colors"
               />
               <p className="text-xs text-white/25 leading-relaxed">
-                Track specific words or emotes. Each gets its own line on the chart and a ranked peak list.
+                Each keyword gets its own line on the chart and a ranked peak list.
               </p>
             </div>
 
-            {/* Bucket size */}
             <div className="flex flex-col gap-2">
               <label className="text-xs text-white/50 uppercase tracking-wider">
                 Time bucket
@@ -176,39 +182,91 @@ export default function App() {
               <StatCard label="Spikes found" value={result.spikes.length} />
             </div>
 
-            {/* Chart */}
-            <div className="bg-white/[0.03] rounded-2xl border border-white/[0.07] p-5 flex flex-col gap-4">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <h2 className="text-sm font-semibold text-white/70">Activity Timeline</h2>
-                <div className="flex items-center gap-3 text-xs text-white/30">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-3 h-0.5 rounded bg-violet-500 inline-block" />
-                    Chat activity
+            {/* Tab bar */}
+            <div className="flex gap-1 bg-white/[0.04] p-1 rounded-xl border border-white/[0.06] self-start">
+              <button
+                onClick={() => setActiveTab("timeline")}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === "timeline"
+                    ? "bg-violet-600 text-white shadow-lg"
+                    : "text-white/40 hover:text-white/70 hover:bg-white/[0.05]"
+                }`}
+              >
+                <Activity size={14} />
+                Timeline & Spikes
+              </button>
+              <button
+                onClick={() => setActiveTab("virality")}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                  activeTab === "virality"
+                    ? "bg-violet-600 text-white shadow-lg"
+                    : "text-white/40 hover:text-white/70 hover:bg-white/[0.05]"
+                }`}
+              >
+                <Flame size={14} />
+                Virality Score
+                {result.viralMoments.length > 0 && (
+                  <span className="bg-white/10 text-white/60 text-xs px-1.5 py-0.5 rounded-md tabular-nums">
+                    {result.viralMoments.length}
                   </span>
-                  {result.keywords.map((kw, i) => (
-                    <span key={kw} className="flex items-center gap-1.5">
-                      <span
-                        className="w-3 h-0.5 rounded inline-block"
-                        style={{
-                          background: ["#f472b6","#34d399","#fbbf24","#60a5fa","#a78bfa","#fb923c","#2dd4bf"][i % 7],
-                        }}
-                      />
-                      {kw}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <ActivityChart result={result} />
+                )}
+              </button>
             </div>
 
-            {/* Spike list */}
-            <div className="bg-white/[0.03] rounded-2xl border border-white/[0.07] p-5">
-              <SpikeList
-                spikes={result.spikes}
-                keywordSpikes={result.keywordSpikes}
-                keywords={result.keywords}
-              />
-            </div>
+            {/* Tab: Timeline */}
+            {activeTab === "timeline" && (
+              <>
+                <div className="bg-white/[0.03] rounded-2xl border border-white/[0.07] p-5 flex flex-col gap-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h2 className="text-sm font-semibold text-white/70">Activity Timeline</h2>
+                    <div className="flex items-center gap-3 text-xs text-white/30 flex-wrap">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-3 h-0.5 rounded bg-violet-500 inline-block" />
+                        Chat activity
+                      </span>
+                      {result.keywords.map((kw, i) => (
+                        <span key={kw} className="flex items-center gap-1.5">
+                          <span
+                            className="w-3 h-0.5 rounded inline-block"
+                            style={{
+                              background: ["#f472b6","#34d399","#fbbf24","#60a5fa","#a78bfa","#fb923c","#2dd4bf"][i % 7],
+                            }}
+                          />
+                          {kw}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <ActivityChart result={result} />
+                </div>
+
+                <div className="bg-white/[0.03] rounded-2xl border border-white/[0.07] p-5">
+                  <SpikeList
+                    spikes={result.spikes}
+                    keywordSpikes={result.keywordSpikes}
+                    keywords={result.keywords}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Tab: Virality */}
+            {activeTab === "virality" && (
+              <div className="bg-white/[0.03] rounded-2xl border border-white/[0.07] p-5 flex flex-col gap-4">
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div>
+                    <h2 className="text-sm font-semibold text-white/70 flex items-center gap-2">
+                      <Flame size={15} className="text-orange-400" />
+                      Top Viral Moments
+                    </h2>
+                    <p className="text-xs text-white/30 mt-1 leading-relaxed max-w-xl">
+                      0–100 clip-worthiness score per {result.bucketSize}s window — blending chat-speed surge (45%), distinct-chatter surge (30%), and hype-token density (25%), each normalized to this stream's own peak.
+                    </p>
+                  </div>
+                </div>
+                <ViralMoments moments={result.viralMoments} bucketSize={result.bucketSize} />
+              </div>
+            )}
           </>
         )}
 
@@ -216,7 +274,10 @@ export default function App() {
         {!result && !error && (
           <div className="text-center py-16 text-white/20">
             <BarChart2 size={40} className="mx-auto mb-3 opacity-30" />
-            <p className="text-sm">Paste a chat log above and hit Analyze to see your stream's hype moments</p>
+            <p className="text-sm">Paste or upload a chat log above and hit Analyze</p>
+            <p className="text-xs mt-1 text-white/15">
+              Accepts CSV exports (Date / Messages / User columns) or plain text logs
+            </p>
           </div>
         )}
       </main>
