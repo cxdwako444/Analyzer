@@ -178,61 +178,46 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     flight: string,
     videoId: string,
   ): { data?: VideoData; rawSnippet: string } {
-    const uidx = flight.indexOf(videoId);
-    if (uidx >= 0) {
-      const obj = enclosingObject(flight, uidx);
-      if (obj) {
-        try {
-          const p = JSON.parse(obj) as Record<string, unknown> & {
-            duration?: number;
-            start_time?: string;
-            created_at?: string;
-            channel?: { slug?: string };
-            livestream?: {
-              duration?: number;
-              start_time?: string;
-              created_at?: string;
-              channel?: { slug?: string };
-            };
-          };
-          const ls = p.livestream ?? {};
-          const duration = p.duration ?? ls.duration;
-          const start_time =
-            p.start_time ?? ls.start_time ?? p.created_at ?? ls.created_at;
-          const slug = p.channel?.slug ?? ls.channel?.slug;
-          if (duration != null) {
-            return {
-              data: {
-                duration: Number(duration),
-                start_time,
-                channel: slug ? { slug } : undefined,
-              },
-              rawSnippet: obj.slice(0, 500),
-            };
-          }
-        } catch {
-          /* fall through to regex */
-        }
-        // Regex within the located object — far more accurate than whole-page.
-        const dur = obj.match(/"duration":\s*(\d+(?:\.\d+)?)/);
-        const start =
+    // Scan EVERY occurrence of the UUID — the first is just Next.js's routing
+    // tree (no data); the real video object is at a later occurrence.
+    let snippet = "";
+    let from = 0;
+    for (let guard = 0; guard < 50; guard++) {
+      const idx = flight.indexOf(videoId, from);
+      if (idx < 0) break;
+      from = idx + videoId.length;
+      const obj = enclosingObject(flight, idx);
+      if (!obj) continue;
+      if (!snippet) snippet = obj.slice(0, 400);
+
+      let duration: number | undefined;
+      let start: string | undefined;
+      let slug: string | undefined;
+      try {
+        const p = JSON.parse(obj);
+        duration = deepNumber(p, "duration");
+        start = deepString(p, ["start_time", "created_at"]);
+        slug = deepString(p, ["slug"]);
+      } catch {
+        const dm = obj.match(/"duration":\s*(\d+(?:\.\d+)?)/);
+        if (dm) duration = Number(dm[1]);
+        const sm =
           obj.match(/"start_time":"([^"]+)"/) ||
           obj.match(/"created_at":"([^"]+)"/);
-        const slug = obj.match(/"slug":"([^"]+)"/);
-        if (dur) {
-          return {
-            data: {
-              duration: Number(dur[1]),
-              start_time: start?.[1],
-              channel: slug ? { slug: slug[1] } : undefined,
-            },
-            rawSnippet: obj.slice(0, 500),
-          };
-        }
-        return { rawSnippet: obj.slice(0, 500) };
+        start = sm?.[1];
+      }
+      if (duration != null && duration > 0) {
+        return {
+          data: {
+            duration,
+            start_time: start,
+            channel: slug ? { slug } : undefined,
+          },
+          rawSnippet: obj.slice(0, 400),
+        };
       }
     }
-    return { rawSnippet: "" };
+    return { rawSnippet: snippet };
   }
 
   try {
@@ -275,6 +260,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     const probeResults: string[] = [];
     let metaSource = videoData ? "flight" : "";
     let metaRaw = "";
+    let listDump = "";
     if (!videoData) {
       const slug = parsed.channel || "";
       // Videos-list first (contains the VOD with duration); channel object is
@@ -301,6 +287,10 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
             metaSource = ep.replace("https://kick.com", "");
             metaRaw = JSON.stringify(match).slice(0, 600);
             break;
+          }
+          // Keep the videos-list body for diagnostics if the VOD isn't in it.
+          if (ep.endsWith("/videos") && !listDump) {
+            listDump = JSON.stringify(r.json).slice(0, 600);
           }
         }
       }
@@ -331,6 +321,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         message:
           `Couldn't find Kick VOD metadata. nav=${cap.navStatus}${cap.navError ? ` navErr=${cap.navError}` : ""} ` +
           `probes=[${probeResults.join(" | ") || "none"}] ` +
+          `videosList=${listDump || "n/a"} ` +
           `title="${cap.title}" embedded=${embeddedKeys} ${flightInfo} ` +
           `failed=${cap.failed.length ? cap.failed.slice(0, 4).join(" ; ") : "none"} ` +
           `responses=${seen || "none"} html="${html}"`,
