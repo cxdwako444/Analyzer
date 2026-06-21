@@ -72,6 +72,14 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
 
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
 
+  // Show movement immediately — a residential proxy can make the first request
+  // slow, and a static "0 messages" spinner looks frozen.
+  sseWrite(res, {
+    type: "progress",
+    count: 0,
+    status: proxyUrl ? "Connecting to Twitch via proxy…" : "Connecting to Twitch…",
+  });
+
   // Pagination state.
   // The FIRST request is by content offset (0 = start of VOD). Every request
   // after that pages forward using the previous page's LAST edge cursor.
@@ -80,6 +88,7 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
   let cursor: string | null = null;
   let hasNextPage = true;
   let consecutiveErrors = 0;
+  let page = 0;
   const MAX_ERRORS = 6;
   const seenCursors = new Set<string>();
   const deviceId = makeDeviceId();
@@ -239,10 +248,15 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         cursor = nextCursor;
       }
 
-      // Progress event roughly every 2 000 messages
-      if (messages.length % 2000 < edges.length) {
-        sseWrite(res, { type: "progress", count: messages.length });
-      }
+      // Emit progress every page so the UI shows live movement (residential
+      // proxies are slow, so the old every-2000 cadence looked frozen).
+      page++;
+      const lastTs = messages[messages.length - 1]?.timestamp ?? 0;
+      sseWrite(res, {
+        type: "progress",
+        count: messages.length,
+        status: `Page ${page} · up to ${Math.floor(lastTs / 60)}m into the VOD`,
+      });
 
       // Polite pause
       await sleep(80);

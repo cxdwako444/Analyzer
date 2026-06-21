@@ -104,8 +104,8 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         type: "error",
         message: `Kick returned HTTP ${videoResp.status} — Cloudflare blocked the request. ${
           proxyUrl
-            ? "Try a different proxy or a residential IP."
-            : "Add a proxy in the Kick panel to bypass Cloudflare."
+            ? "Your proxy IS being used, but a plain residential IP usually isn't enough for Kick: Cloudflare also fingerprints the TLS/browser, which a server can't fake. Use a Cloudflare-solving 'unblocker'/'site unlocker' endpoint (Decodo Site Unblocker, Bright Data Web Unlocker, ScraperAPI, ZenRows) instead of a raw proxy."
+            : "Add a proxy in the Kick panel — but note Kick's Cloudflare usually needs a Cloudflare-solving 'unblocker' endpoint, not just a raw residential proxy."
         }`,
       });
       res.end();

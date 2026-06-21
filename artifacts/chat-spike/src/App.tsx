@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v4 · 2026-06-21 · Twitch proxy support + Decodo proxy format";
+const BUILD_VERSION = "v5 · 2026-06-21 · live Twitch progress + clearer Kick errors";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
