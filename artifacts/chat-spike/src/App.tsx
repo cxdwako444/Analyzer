@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v7 · 2026-06-21 · Kick via headless browser (Cloudflare bypass)";
+const BUILD_VERSION = "v8 · 2026-06-21 · Kick uses Replit/Nix system Chromium";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (

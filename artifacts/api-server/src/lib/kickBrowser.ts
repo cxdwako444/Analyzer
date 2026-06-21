@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { normalizeProxy } from "./proxy";
 
 /**
@@ -14,6 +15,37 @@ export interface KickBrowserSession {
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+/**
+ * Find a Chromium binary to drive. Prefers an explicit env override, otherwise
+ * looks for a system Chromium on PATH — which is how Replit/Nix exposes it.
+ * We use playwright-core (no bundled browser), so a path is required.
+ */
+function resolveChromiumPath(): string | undefined {
+  const env =
+    process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"] ||
+    process.env["CHROMIUM_EXECUTABLE_PATH"];
+  if (env) return env;
+
+  for (const name of [
+    "chromium",
+    "chromium-browser",
+    "google-chrome-stable",
+    "google-chrome",
+  ]) {
+    try {
+      const p = execSync(`which ${name}`, {
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim();
+      if (p) return p;
+    } catch {
+      /* not on PATH, try next */
+    }
+  }
+  return undefined;
+}
+
 /** Convert our normalized proxy URL into Playwright's proxy option shape. */
 function toPlaywrightProxy(rawProxy: string | null | undefined) {
   const normalized = normalizeProxy(rawProxy);
@@ -29,22 +61,25 @@ function toPlaywrightProxy(rawProxy: string | null | undefined) {
 export async function openKickSession(
   opts: { proxy?: string | null } = {},
 ): Promise<KickBrowserSession> {
-  // Dynamic import so a missing/optional playwright install doesn't crash the
-  // whole server at boot — only the Kick route needs it.
-  let chromium: typeof import("playwright").chromium;
+  // Dynamic import so a missing install doesn't crash the server at boot —
+  // only the Kick route needs it. playwright-core has no bundled browser, so
+  // we drive a system Chromium (Replit/Nix provides one on PATH).
+  let chromium: typeof import("playwright-core").chromium;
   try {
-    ({ chromium } = await import("playwright"));
+    ({ chromium } = await import("playwright-core"));
   } catch {
     throw new Error(
-      "Headless browser support isn't installed. On the server run: " +
-        "`pnpm --filter @workspace/api-server exec playwright install --with-deps chromium`.",
+      "Headless browser support isn't installed (playwright-core missing). Run `pnpm install`.",
     );
   }
 
-  const executablePath =
-    process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"] ||
-    process.env["CHROMIUM_EXECUTABLE_PATH"] ||
-    undefined;
+  const executablePath = resolveChromiumPath();
+  if (!executablePath) {
+    throw new Error(
+      "No Chromium found. On Replit, add the `chromium` system package (Nix) — " +
+        "tell the Replit Agent to add chromium — or set CHROMIUM_EXECUTABLE_PATH to a Chromium binary.",
+    );
+  }
 
   let browser;
   try {
@@ -60,9 +95,8 @@ export async function openKickSession(
     });
   } catch (err) {
     throw new Error(
-      `Could not launch headless Chromium: ${String(err)}. ` +
-        "Install the browser with `playwright install --with-deps chromium`, " +
-        "or point CHROMIUM_EXECUTABLE_PATH at a system Chromium.",
+      `Could not launch Chromium at ${executablePath}: ${String(err)}. ` +
+        "On Replit make sure the chromium Nix package is installed.",
     );
   }
 
