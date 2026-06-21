@@ -152,6 +152,28 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     }
     return undefined;
   }
+
+  // Deep-search a (VOD-scoped) object for a numeric/string field by name.
+  function deepNumber(node: unknown, key: string, depth = 0): number | undefined {
+    if (depth > 6 || !node || typeof node !== "object") return undefined;
+    const o = node as Record<string, unknown>;
+    if (typeof o[key] === "number") return o[key] as number;
+    for (const v of Object.values(o)) {
+      const f = deepNumber(v, key, depth + 1);
+      if (f != null) return f;
+    }
+    return undefined;
+  }
+  function deepString(node: unknown, keys: string[], depth = 0): string | undefined {
+    if (depth > 6 || !node || typeof node !== "object") return undefined;
+    const o = node as Record<string, unknown>;
+    for (const k of keys) if (typeof o[k] === "string") return o[k] as string;
+    for (const v of Object.values(o)) {
+      const f = deepString(v, keys, depth + 1);
+      if (f) return f;
+    }
+    return undefined;
+  }
   function extractVideoFromFlight(
     flight: string,
     videoId: string,
@@ -255,26 +277,25 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     let metaRaw = "";
     if (!videoData) {
       const slug = parsed.channel || "";
+      // Videos-list first (contains the VOD with duration); channel object is
+      // intentionally NOT used here — it isn't the VOD.
       const candidates = [
-        `https://kick.com/api/v1/video/${parsed.videoId}`,
-        `https://kick.com/api/v2/video/${parsed.videoId}`,
         ...(slug
           ? [
               `https://kick.com/api/v2/channels/${slug}/videos/${parsed.videoId}`,
               `https://kick.com/api/v1/channels/${slug}/videos/${parsed.videoId}`,
-              `https://kick.com/api/v2/channels/${slug}`,
               `https://kick.com/api/v2/channels/${slug}/videos`,
             ]
           : []),
+        `https://kick.com/api/v1/video/${parsed.videoId}`,
+        `https://kick.com/api/v2/video/${parsed.videoId}`,
       ];
       for (const ep of candidates) {
         const r = await session.fetchJson(ep);
         probeResults.push(`${r.status} ${ep.replace("https://kick.com", "")}`);
         if (r.status === 200 && r.json) {
-          // Prefer the object matched by UUID, then video-shaped objects.
-          const match =
-            findByUuid(r.json, parsed.videoId) ??
-            (looksLikeVideo(r.json) ? (r.json as VideoData) : findVideoInTree(r.json));
+          // Strict: only the object whose uuid matches this VOD.
+          const match = findByUuid(r.json, parsed.videoId);
           if (match) {
             videoData = match;
             metaSource = ep.replace("https://kick.com", "");
@@ -330,9 +351,11 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       throw new Error("no-channel");
     }
 
-    const rawStartTime = videoData.start_time ?? videoData.livestream?.start_time;
+    // videoData is the VOD object (uuid-matched), so deep-searching its fields
+    // is safe and finds duration/start_time wherever Kick nests them.
+    const rawStartTime = deepString(videoData, ["start_time", "created_at"]);
     // Kick's duration is sometimes ms, sometimes seconds — normalize by size.
-    const rawDuration = videoData.duration ?? videoData.livestream?.duration ?? 0;
+    const rawDuration = deepNumber(videoData, "duration") ?? 0;
     const durationSecs = rawDuration >= 100_000 ? rawDuration / 1000 : rawDuration;
     const startUnix = rawStartTime ? Date.parse(rawStartTime) / 1000 : 0;
 
@@ -340,7 +363,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       const dump = metaRaw || JSON.stringify(videoData).slice(0, 600);
       sseWrite(res, {
         type: "error",
-        message: `Found VOD metadata (source=${metaSource || "?"}) but no usable duration. object=${dump}`,
+        message: `Found VOD metadata (source=${metaSource || "?"}) but no usable duration. probes=[${probeResults.join(" | ") || "none"}] object=${dump}`,
       });
       throw new Error("no-duration");
     }
