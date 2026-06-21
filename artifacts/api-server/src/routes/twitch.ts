@@ -89,12 +89,37 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
   let hasNextPage = true;
   let consecutiveErrors = 0;
   let page = 0;
-  const MAX_ERRORS = 6;
+  const MAX_ERRORS = 4;
   const seenCursors = new Set<string>();
-  const deviceId = makeDeviceId();
+
+  // Wall-clock deadline so the handler ALWAYS returns a result (or a clear
+  // error) before the platform gateway kills a stalled request (~60s on
+  // Autoscale). Without this, a hanging proxy yields "Stream ended without a
+  // completion event" on the client.
+  const DEADLINE_MS = 50_000;
+  const startedAt = Date.now();
 
   try {
     while (hasNextPage && !req.destroyed) {
+      if (Date.now() - startedAt > DEADLINE_MS) {
+        if (messages.length === 0) {
+          sseWrite(res, {
+            type: "error",
+            message: proxyUrl
+              ? "Timed out before any messages came back — the proxy is too slow or is blocking Twitch. Clear the Twitch proxy field and try again; Twitch usually works without one."
+              : "Timed out before any messages came back. Try again, or paste a working residential proxy.",
+          });
+          res.end();
+          return;
+        }
+        sseWrite(res, {
+          type: "ratelimit",
+          message: `Hit the ${DEADLINE_MS / 1000}s time limit — analyzing the ${messages.length} messages fetched so far. For very long VODs, run the server locally where there's no gateway timeout.`,
+          count: messages.length,
+        });
+        break;
+      }
+
       const variables: Record<string, unknown> = cursor
         ? { videoID: videoId, cursor }
         : { videoID: videoId, contentOffsetSeconds: 0 };
@@ -121,24 +146,27 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
             "Content-Type": "application/json",
             Accept: "application/json",
             "Accept-Language": "en-US",
-            "Device-ID": deviceId,
+            // Fresh Device-ID per request to reduce bot-checks on later pages
+            "Device-ID": makeDeviceId(),
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           },
           body,
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(10_000),
         });
       } catch (err) {
         consecutiveErrors++;
         if (consecutiveErrors > MAX_ERRORS) {
           sseWrite(res, {
             type: "error",
-            message: `Network error after ${MAX_ERRORS} retries: ${String(err)}`,
+            message: proxyUrl
+              ? `The proxy failed to reach Twitch after ${MAX_ERRORS} tries (${String(err)}). Clear the Twitch proxy field and try again — Twitch usually works without one.`
+              : `Network error reaching Twitch after ${MAX_ERRORS} tries: ${String(err)}`,
           });
           res.end();
           return;
         }
-        await sleep(Math.min(1000 * Math.pow(2, consecutiveErrors), 16_000));
+        await sleep(Math.min(500 * Math.pow(2, consecutiveErrors), 3_000));
         continue;
       }
 
