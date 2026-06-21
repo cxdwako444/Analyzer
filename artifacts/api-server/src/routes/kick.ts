@@ -112,6 +112,23 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return undefined;
   }
 
+  // Pull video metadata out of Next.js flight data (server-rendered text).
+  function extractFromFlight(flight: string): VideoData | undefined {
+    const dur = flight.match(/"duration":\s*(\d+(?:\.\d+)?)/);
+    if (!dur) return undefined;
+    const start =
+      flight.match(/"start_time":"([^"]+)"/) ||
+      flight.match(/"created_at":"([^"]+)"/);
+    const slug =
+      flight.match(/"channel":\s*\{[^}]*?"slug":"([^"]+)"/) ||
+      flight.match(/"slug":"([^"]+)"/);
+    return {
+      duration: Number(dur[1]),
+      start_time: start?.[1],
+      channel: slug ? { slug: slug[1] } : undefined,
+    };
+  }
+
   try {
     // ── Step 1: resolve video metadata ──────────────────────────────────────
     // Load the real VOD page and capture whatever video API Kick's frontend
@@ -129,6 +146,18 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     // …then in embedded page state (Kick may server-render the data)…
     if (!videoData && cap.embedded) {
       const found = findVideoInTree(cap.embedded);
+      if (found) videoData = found;
+    }
+
+    // …then mine the Next.js flight data (SSR'd text) — Kick's data API is
+    // reCAPTCHA-gated, but the page itself ships the video metadata.
+    const flight =
+      cap.embedded &&
+      typeof (cap.embedded as Record<string, unknown>)["flight"] === "string"
+        ? ((cap.embedded as Record<string, unknown>)["flight"] as string)
+        : "";
+    if (!videoData && flight) {
+      const found = extractFromFlight(flight);
       if (found) videoData = found;
     }
 
@@ -156,12 +185,22 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         cap.embedded && typeof cap.embedded === "object"
           ? Object.keys(cap.embedded as object).join(",")
           : "none";
-      const html = cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 300);
+      const html = cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 200);
+      // If we have flight data but couldn't parse it, show the region around a
+      // likely video field so we can adjust the extractor.
+      const durIdx = flight.indexOf('"duration"');
+      const flightInfo = flight
+        ? `flightLen=${flight.length} ${
+            durIdx >= 0
+              ? `near-duration="${flight.slice(Math.max(0, durIdx - 200), durIdx + 200)}"`
+              : `head="${flight.slice(0, 300)}"`
+          }`
+        : "flight=none";
       sseWrite(res, {
         type: "error",
         message:
           `Couldn't find Kick VOD metadata. nav=${cap.navStatus}${cap.navError ? ` navErr=${cap.navError}` : ""} ` +
-          `title="${cap.title}" embedded=${embeddedKeys} ` +
+          `title="${cap.title}" embedded=${embeddedKeys} ${flightInfo} ` +
           `failed=${cap.failed.length ? cap.failed.slice(0, 4).join(" ; ") : "none"} ` +
           `responses=${seen || "none"} html="${html}"`,
       });

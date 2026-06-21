@@ -241,6 +241,22 @@ export async function openKickSession(
           for (const key of ["__NEXT_DATA__", "__NUXT__", "__remixContext"]) {
             if (g[key]) out[key] = g[key];
           }
+          // Next.js App Router streams server data into self.__next_f as an
+          // array of chunks — concatenate the string payloads so we can mine
+          // the SSR'd video metadata without hitting a reCAPTCHA-gated API.
+          try {
+            const nf = g["__next_f"];
+            if (Array.isArray(nf)) {
+              let flight = "";
+              for (const it of nf) {
+                if (Array.isArray(it) && typeof it[1] === "string") flight += it[1];
+                else if (typeof it === "string") flight += it;
+              }
+              if (flight) out["flight"] = flight.slice(0, 800_000);
+            }
+          } catch {
+            /* ignore */
+          }
           const nodes = g.document
             ? Array.from(g.document.querySelectorAll('script[type="application/json"]'))
             : [];
