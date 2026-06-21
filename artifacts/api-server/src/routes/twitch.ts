@@ -23,6 +23,15 @@ function sseWrite(res: Response, data: object) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+function makeDeviceId(): string {
+  const chars =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let id = "";
+  for (let i = 0; i < 32; i++)
+    id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
+}
+
 router.get("/twitch-chat", async (req: Request, res: Response) => {
   const { videoId: rawId } = req.query;
   if (!rawId || typeof rawId !== "string") {
@@ -32,7 +41,9 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
 
   const videoId = extractVideoId(rawId);
   if (!videoId || !/^\d+$/.test(videoId)) {
-    res.status(400).json({ error: `Could not extract a numeric video ID from: ${rawId}` });
+    res
+      .status(400)
+      .json({ error: `Could not extract a numeric video ID from: ${rawId}` });
     return;
   }
 
@@ -44,22 +55,38 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
   res.socket?.setNoDelay(true);
   res.flushHeaders();
 
+  // Send an immediate comment so the gateway sees a 200 response right away,
+  // then keep the connection warm with heartbeats. Long VOD fetches can
+  // otherwise look idle to the proxy and get killed with a 502 Bad Gateway.
+  res.write(": connected\n\n");
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(": keepalive\n\n");
+  }, 15_000);
+
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
-  let contentOffset = 0;
+
+  // Pagination state.
+  // The FIRST request is by content offset (0 = start of VOD). Every request
+  // after that pages forward using the previous page's LAST edge cursor.
+  // Cursor paging (not re-querying by offset) is what walks the ENTIRE VOD;
+  // re-sending contentOffsetSeconds stalls once chat is dense and stops early.
+  let cursor: string | null = null;
   let hasNextPage = true;
   let consecutiveErrors = 0;
   const MAX_ERRORS = 6;
-  let lastPageOffset = -1;
+  const seenCursors = new Set<string>();
+  const deviceId = makeDeviceId();
 
   try {
     while (hasNextPage && !req.destroyed) {
+      const variables: Record<string, unknown> = cursor
+        ? { videoID: videoId, cursor }
+        : { videoID: videoId, contentOffsetSeconds: 0 };
+
       const body = JSON.stringify([
         {
           operationName: "VideoCommentsByOffsetOrCursor",
-          variables: {
-            videoID: videoId,
-            contentOffsetSeconds: contentOffset,
-          },
+          variables,
           extensions: {
             persistedQuery: {
               version: 1,
@@ -77,6 +104,10 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
             "Client-Id": TWITCH_CLIENT_ID,
             "Content-Type": "application/json",
             Accept: "application/json",
+            "Accept-Language": "en-US",
+            "Device-ID": deviceId,
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           },
           body,
           signal: AbortSignal.timeout(15_000),
@@ -131,13 +162,23 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         return;
       }
 
-      const root = (json as Array<{ data?: { video?: { comments?: { edges?: unknown[]; pageInfo?: { hasNextPage?: boolean } } } | null } }>)[0];
+      const root = (
+        json as Array<{
+          data?: {
+            video?: {
+              comments?: {
+                edges?: unknown[];
+                pageInfo?: { hasNextPage?: boolean };
+              };
+            } | null;
+          };
+        }>
+      )[0];
       const video = root?.data?.video;
 
       if (!video) {
-        // Could be a private/deleted VOD, or an integrity check failure
+        // Could be a private/deleted VOD, or an integrity/bot-check failure
         if (messages.length > 0) {
-          // Treat as rate limit / bot check — return what we have
           sseWrite(res, {
             type: "ratelimit",
             message:
@@ -148,27 +189,27 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         }
         sseWrite(res, {
           type: "error",
-          message: "VOD not found, is private, or Twitch rejected the request. Check the video ID.",
+          message:
+            "VOD not found, is private, or Twitch rejected the request. Check the video ID.",
         });
         res.end();
         return;
       }
 
       const edges = (video.comments?.edges ?? []) as Array<{
+        cursor?: string;
         node: {
           content_offset_seconds: number;
           commenter?: { display_name?: string };
           message?: { fragments?: Array<{ text?: string }> };
         };
       }>;
-      hasNextPage = video.comments?.pageInfo?.hasNextPage ?? false;
 
       if (edges.length === 0) {
         hasNextPage = false;
         break;
       }
 
-      let furthestOffset = contentOffset;
       for (const edge of edges) {
         const node = edge.node;
         const ts = node.content_offset_seconds ?? 0;
@@ -176,16 +217,19 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         const text =
           node.message?.fragments?.map((f) => f.text ?? "").join("") ?? "";
         messages.push({ timestamp: ts, user, text });
-        if (ts > furthestOffset) furthestOffset = ts;
       }
 
-      // Guard: if we made no progress, break to avoid infinite loop
-      if (furthestOffset === lastPageOffset) {
+      // Advance using the LAST edge's cursor. Stop when Twitch reports no more
+      // pages, when there's no cursor, or if a cursor repeats (loop guard).
+      hasNextPage = video.comments?.pageInfo?.hasNextPage ?? false;
+      const nextCursor = edges[edges.length - 1]?.cursor ?? null;
+
+      if (!nextCursor || seenCursors.has(nextCursor)) {
         hasNextPage = false;
-        break;
+      } else {
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
       }
-      lastPageOffset = furthestOffset;
-      contentOffset = furthestOffset;
 
       // Progress event roughly every 2 000 messages
       if (messages.length % 2000 < edges.length) {
@@ -203,6 +247,8 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
     });
   } catch (err) {
     sseWrite(res, { type: "error", message: String(err) });
+  } finally {
+    clearInterval(heartbeat);
   }
 
   res.end();

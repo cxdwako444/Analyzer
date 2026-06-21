@@ -43,7 +43,10 @@ function parseKickUrl(url: string): { videoId: string; channel: string } | null 
   return null;
 }
 
-type FetchFn = (url: string, opts?: object) => Promise<Response>;
+// Note: `Response` from "express" is imported above and shadows the global
+// fetch Response, so reference the global one explicitly here.
+type FetchResponse = globalThis.Response;
+type FetchFn = (url: string, opts?: object) => Promise<FetchResponse>;
 
 function makeFetcher(proxyUrl: string | null): FetchFn {
   if (!proxyUrl) {
@@ -56,7 +59,7 @@ function makeFetcher(proxyUrl: string | null): FetchFn {
       dispatcher: agent,
     });
     // undici response is compatible with the Fetch API
-    return resp as unknown as Response;
+    return resp as unknown as FetchResponse;
   };
 }
 
@@ -87,6 +90,12 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
   res.socket?.setNoDelay(true);
   res.flushHeaders();
 
+  // Immediate response + heartbeats so the gateway doesn't 502 a long fetch.
+  res.write(": connected\n\n");
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(": keepalive\n\n");
+  }, 15_000);
+
   const kickFetch = makeFetcher(proxyUrl);
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
 
@@ -94,7 +103,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     // ── Step 1: resolve video metadata ──────────────────────────────────────
     sseWrite(res, { type: "progress", count: 0, status: "Resolving VOD metadata…" });
 
-    let videoResp: Response;
+    let videoResp: FetchResponse;
     try {
       videoResp = await kickFetch(
         `https://kick.com/api/v1/video/${parsed.videoId}`,
@@ -199,7 +208,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       const windowStart = startUnix + w * WINDOW;
       const windowEnd = windowStart + WINDOW;
 
-      let chunkResp: Response;
+      let chunkResp: FetchResponse;
       try {
         const url =
           `https://kick.com/api/v2/channels/${channelSlug}/messages` +
@@ -269,6 +278,8 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     sseWrite(res, { type: "done", messages, totalCount: messages.length });
   } catch (err) {
     sseWrite(res, { type: "error", message: String(err) });
+  } finally {
+    clearInterval(heartbeat);
   }
 
   res.end();
