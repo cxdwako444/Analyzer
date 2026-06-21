@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { makeFetcher } from "../lib/proxy";
 
 const router = Router();
 
@@ -33,11 +34,17 @@ function makeDeviceId(): string {
 }
 
 router.get("/twitch-chat", async (req: Request, res: Response) => {
-  const { videoId: rawId } = req.query;
+  const { videoId: rawId, proxy: rawProxy } = req.query;
   if (!rawId || typeof rawId !== "string") {
     res.status(400).json({ error: "videoId query param is required" });
     return;
   }
+
+  // Optional proxy — Twitch bot-checks datacenter IPs (e.g. Replit) after the
+  // first page, so a residential proxy is needed to walk a full VOD.
+  const { fetch: twitchFetch, proxyUrl } = makeFetcher(
+    typeof rawProxy === "string" ? rawProxy : null,
+  );
 
   const videoId = extractVideoId(rawId);
   if (!videoId || !/^\d+$/.test(videoId)) {
@@ -98,7 +105,7 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
 
       let resp: globalThis.Response;
       try {
-        resp = await fetch(TWITCH_GQL, {
+        resp = await twitchFetch(TWITCH_GQL, {
           method: "POST",
           headers: {
             "Client-Id": TWITCH_CLIENT_ID,
@@ -181,8 +188,9 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         if (messages.length > 0) {
           sseWrite(res, {
             type: "ratelimit",
-            message:
-              "Twitch returned empty data — this is often a bot-check or rate limit. Analyzing the messages fetched so far.",
+            message: proxyUrl
+              ? "Twitch bot-checked the request even through the proxy — analyzing the messages fetched so far. Try a different residential proxy."
+              : "Twitch bot-checked this server's IP after the first page (common on cloud hosts). Add a residential proxy in the Twitch panel to fetch the full VOD. Analyzing what we got so far.",
             count: messages.length,
           });
           break;

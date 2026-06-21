@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { makeFetcher, type FetchResponse } from "../lib/proxy";
 
 const router = Router();
 
@@ -43,26 +43,6 @@ function parseKickUrl(url: string): { videoId: string; channel: string } | null 
   return null;
 }
 
-// Note: `Response` from "express" is imported above and shadows the global
-// fetch Response, so reference the global one explicitly here.
-type FetchResponse = globalThis.Response;
-type FetchFn = (url: string, opts?: object) => Promise<FetchResponse>;
-
-function makeFetcher(proxyUrl: string | null): FetchFn {
-  if (!proxyUrl) {
-    return (url, opts) => fetch(url, opts as RequestInit);
-  }
-  const agent = new ProxyAgent(proxyUrl);
-  return async (url, opts) => {
-    const resp = await undiciFetch(url, {
-      ...(opts ?? {}),
-      dispatcher: agent,
-    });
-    // undici response is compatible with the Fetch API
-    return resp as unknown as FetchResponse;
-  };
-}
-
 router.get("/kick-chat", async (req: Request, res: Response) => {
   const { url: rawUrl, proxy: rawProxy } = req.query;
 
@@ -77,10 +57,9 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return;
   }
 
-  const proxyUrl =
-    rawProxy && typeof rawProxy === "string" && rawProxy.trim()
-      ? rawProxy.trim()
-      : null;
+  const { fetch: kickFetch, proxyUrl } = makeFetcher(
+    typeof rawProxy === "string" ? rawProxy : null,
+  );
 
   // Set up SSE
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -96,7 +75,6 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     if (!res.writableEnded) res.write(": keepalive\n\n");
   }, 15_000);
 
-  const kickFetch = makeFetcher(proxyUrl);
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
 
   try {

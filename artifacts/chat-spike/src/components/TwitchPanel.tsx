@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Tv2, Play, Loader2, AlertTriangle, CheckCircle2, X } from "lucide-react";
 
 interface TwitchPanelProps {
-  onFetch: (videoId: string) => void;
+  onFetch: (videoId: string, proxy: string) => void;
   isFetching: boolean;
   progress: { count: number; status?: string } | null;
   warning: string | null;
@@ -17,11 +17,12 @@ export default function TwitchPanel({
   onClearWarning,
 }: TwitchPanelProps) {
   const [url, setUrl] = useState("");
+  const [proxy, setProxy] = useState("");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const id = extractId(url.trim());
-    if (id) onFetch(id);
+    if (id) onFetch(id, proxy.trim());
   }
 
   function extractId(raw: string): string {
@@ -51,6 +52,24 @@ export default function TwitchPanel({
         />
         <p className="text-xs text-white/25 leading-relaxed">
           Paste a full Twitch VOD URL or bare video ID. Chat is fetched from Twitch's API — no login needed.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className="text-xs text-white/40 uppercase tracking-wider">
+          Proxy{" "}
+          <span className="text-white/20 normal-case tracking-normal">(recommended for full VODs)</span>
+        </label>
+        <input
+          type="text"
+          value={proxy}
+          onChange={(e) => setProxy(e.target.value)}
+          placeholder="host:port:user:pass or http://user:pass@host:port"
+          disabled={isFetching}
+          className="w-full rounded-lg bg-white/[0.04] border border-white/10 text-sm text-white/80 placeholder-white/20 px-3 py-2.5 focus:outline-none focus:border-purple-500/40 focus:bg-white/[0.06] disabled:opacity-50 transition-colors font-mono"
+        />
+        <p className="text-xs text-white/25 leading-relaxed">
+          On cloud hosts (Replit) Twitch bot-checks after ~1 page. A residential proxy fetches the whole VOD. Leave blank to try without.
         </p>
       </div>
 

@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v3 · 2026-06-21 · Twitch cursor paging + SSE keepalive";
+const BUILD_VERSION = "v4 · 2026-06-21 · Twitch proxy support + Decodo proxy format";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -118,7 +118,7 @@ export default function App() {
 
   // ── Twitch fetch ──────────────────────────────────────────────────────────
   const handleTwitchFetch = useCallback(
-    async (videoId: string) => {
+    async (videoId: string, proxy: string) => {
       abortRef.current?.abort();
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -130,8 +130,11 @@ export default function App() {
       setResult(null);
       setIsAnalyzing(false);
 
+      const params = new URLSearchParams({ videoId });
+      if (proxy) params.set("proxy", proxy);
+
       try {
-        const raw = await streamFetch(`/api/twitch-chat?videoId=${encodeURIComponent(videoId)}`, {
+        const raw = await streamFetch(`/api/twitch-chat?${params.toString()}`, {
           onProgress: (count, status) => setTwitchProgress({ count, status }),
           onWarning: (msg) => setTwitchWarning(msg),
           signal: ctrl.signal,
