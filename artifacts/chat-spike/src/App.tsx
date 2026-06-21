@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v13 · 2026-06-21 · Kick chat-endpoint discovery + probe";
+const BUILD_VERSION = "v14 · 2026-06-21 · Kick correct duration/start via UUID lookup";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (

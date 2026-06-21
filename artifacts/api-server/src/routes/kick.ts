@@ -112,21 +112,95 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return undefined;
   }
 
-  // Pull video metadata out of Next.js flight data (server-rendered text).
-  function extractFromFlight(flight: string): VideoData | undefined {
-    const dur = flight.match(/"duration":\s*(\d+(?:\.\d+)?)/);
-    if (!dur) return undefined;
-    const start =
-      flight.match(/"start_time":"([^"]+)"/) ||
-      flight.match(/"created_at":"([^"]+)"/);
-    const slug =
-      flight.match(/"channel":\s*\{[^}]*?"slug":"([^"]+)"/) ||
-      flight.match(/"slug":"([^"]+)"/);
-    return {
-      duration: Number(dur[1]),
-      start_time: start?.[1],
-      channel: slug ? { slug: slug[1] } : undefined,
-    };
+  // Walk outward from `idx` to the smallest balanced {…} object containing it.
+  function enclosingObject(text: string, idx: number): string | null {
+    let start = -1;
+    let depth = 0;
+    for (let i = idx; i >= 0; i--) {
+      const c = text[i];
+      if (c === "}") depth++;
+      else if (c === "{") {
+        if (depth === 0) {
+          start = i;
+          break;
+        }
+        depth--;
+      }
+    }
+    if (start < 0) return null;
+    let d = 0;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (c === "{") d++;
+      else if (c === "}") {
+        d--;
+        if (d === 0) return text.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  // Find the real video object in Next.js flight data via the VOD's UUID, so we
+  // read the correct duration/start_time (not some unrelated "duration" field).
+  function extractVideoFromFlight(
+    flight: string,
+    videoId: string,
+  ): { data?: VideoData; rawSnippet: string } {
+    const uidx = flight.indexOf(videoId);
+    if (uidx >= 0) {
+      const obj = enclosingObject(flight, uidx);
+      if (obj) {
+        try {
+          const p = JSON.parse(obj) as Record<string, unknown> & {
+            duration?: number;
+            start_time?: string;
+            created_at?: string;
+            channel?: { slug?: string };
+            livestream?: {
+              duration?: number;
+              start_time?: string;
+              created_at?: string;
+              channel?: { slug?: string };
+            };
+          };
+          const ls = p.livestream ?? {};
+          const duration = p.duration ?? ls.duration;
+          const start_time =
+            p.start_time ?? ls.start_time ?? p.created_at ?? ls.created_at;
+          const slug = p.channel?.slug ?? ls.channel?.slug;
+          if (duration != null) {
+            return {
+              data: {
+                duration: Number(duration),
+                start_time,
+                channel: slug ? { slug } : undefined,
+              },
+              rawSnippet: obj.slice(0, 500),
+            };
+          }
+        } catch {
+          /* fall through to regex */
+        }
+        // Regex within the located object — far more accurate than whole-page.
+        const dur = obj.match(/"duration":\s*(\d+(?:\.\d+)?)/);
+        const start =
+          obj.match(/"start_time":"([^"]+)"/) ||
+          obj.match(/"created_at":"([^"]+)"/);
+        const slug = obj.match(/"slug":"([^"]+)"/);
+        if (dur) {
+          return {
+            data: {
+              duration: Number(dur[1]),
+              start_time: start?.[1],
+              channel: slug ? { slug: slug[1] } : undefined,
+            },
+            rawSnippet: obj.slice(0, 500),
+          };
+        }
+        return { rawSnippet: obj.slice(0, 500) };
+      }
+    }
+    return { rawSnippet: "" };
   }
 
   try {
@@ -156,9 +230,11 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       typeof (cap.embedded as Record<string, unknown>)["flight"] === "string"
         ? ((cap.embedded as Record<string, unknown>)["flight"] as string)
         : "";
+    let flightSnippet = "";
     if (!videoData && flight) {
-      const found = extractFromFlight(flight);
-      if (found) videoData = found;
+      const r = extractVideoFromFlight(flight, parsed.videoId);
+      flightSnippet = r.rawSnippet;
+      if (r.data) videoData = r.data;
     }
 
     // …then fall back to known direct endpoints.
@@ -221,8 +297,9 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     }
 
     const rawStartTime = videoData.start_time ?? videoData.livestream?.start_time;
-    const durationSecs =
-      (videoData.duration ?? videoData.livestream?.duration ?? 0) / 1000;
+    // Kick's duration is sometimes ms, sometimes seconds — normalize by size.
+    const rawDuration = videoData.duration ?? videoData.livestream?.duration ?? 0;
+    const durationSecs = rawDuration >= 100_000 ? rawDuration / 1000 : rawDuration;
     const startUnix = rawStartTime ? Date.parse(rawStartTime) / 1000 : 0;
 
     if (durationSecs <= 0) {
@@ -325,8 +402,9 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       sseWrite(res, {
         type: "error",
         message:
-          `Got VOD metadata (channel=${channelSlug}, ${Math.round(durationSecs / 60)}min) but 0 chat messages. ` +
-          `Our probe: ${firstProbe || "n/a"}. Chat requests the page made: ${disc}`,
+          `Got VOD metadata (channel=${channelSlug}, dur=${Math.round(durationSecs)}s, startUnix=${startUnix}) but 0 chat messages. ` +
+          `Our probe: ${firstProbe || "n/a"}. Chat requests the page made: ${disc}. ` +
+          `videoObj="${flightSnippet.replace(/\s+/g, " ").slice(0, 300)}"`,
       });
       throw new Error("no-chat");
     }
