@@ -233,6 +233,14 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       throw new Error("no-duration");
     }
 
+    // ── Discover the real chat-replay endpoint by playing the VOD ────────
+    sseWrite(res, {
+      type: "progress",
+      count: 0,
+      status: "Playing VOD to discover the chat endpoint…",
+    });
+    const discoveredChat = await session.captureChatRequests(12);
+
     // ── Step 2: page through chat replay in 2-min windows ────────────────
     const WINDOW = 120; // seconds per chunk request
     const totalWindows = Math.ceil(durationSecs / WINDOW);
@@ -243,6 +251,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     });
 
     let blockedStreak = 0;
+    let firstProbe = "";
     for (let w = 0; w < totalWindows && !req.destroyed; w++) {
       const windowStart = startUnix + w * WINDOW;
       const windowEnd = windowStart + WINDOW;
@@ -251,6 +260,9 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         `https://kick.com/api/v2/channels/${channelSlug}/messages` +
         `?start_time=${Math.floor(windowStart)}&end_time=${Math.floor(windowEnd)}`;
       const chunk = await session.fetchJson(url);
+      if (!firstProbe) {
+        firstProbe = `status=${chunk.status} body="${chunk.text.replace(/\s+/g, " ").slice(0, 200)}"`;
+      }
 
       if (chunk.status === 403 || chunk.status === 503 || chunk.status === 429) {
         // Cloudflare may start blocking mid-run; tolerate a few then bail.
@@ -304,11 +316,26 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       await sleep(150);
     }
 
+    if (messages.length === 0) {
+      // Tell us what the chat endpoint actually did, and what the page itself
+      // requested for chat, so we can target the right endpoint.
+      const disc = discoveredChat.length
+        ? discoveredChat.slice(0, 6).join(" | ")
+        : "none";
+      sseWrite(res, {
+        type: "error",
+        message:
+          `Got VOD metadata (channel=${channelSlug}, ${Math.round(durationSecs / 60)}min) but 0 chat messages. ` +
+          `Our probe: ${firstProbe || "n/a"}. Chat requests the page made: ${disc}`,
+      });
+      throw new Error("no-chat");
+    }
+
     sseWrite(res, { type: "done", messages, totalCount: messages.length });
   } catch (err) {
     // Errors we surfaced above are thrown to break out; only report unexpected ones.
     const msg = err instanceof Error ? err.message : String(err);
-    if (!["blocked", "no-metadata", "no-channel", "no-duration"].includes(msg)) {
+    if (!["blocked", "no-metadata", "no-channel", "no-duration", "no-chat"].includes(msg)) {
       sseWrite(res, { type: "error", message: msg });
     }
   } finally {

@@ -26,6 +26,11 @@ export interface KickBrowserSession {
     title: string;
     embedded: unknown | null;
   }>;
+  /**
+   * Start VOD playback and capture any chat/message/replay request URLs the
+   * page fires — so we can discover Kick's current chat-replay endpoint.
+   */
+  captureChatRequests(seconds?: number): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -272,6 +277,45 @@ export async function openKickSession(
       const pageUrl = page.url();
       const title = await page.title().catch(() => "");
       return { responses, failed, navStatus, navError, htmlSnippet, pageUrl, title, embedded };
+    },
+    async captureChatRequests(seconds = 12) {
+      const urls = new Set<string>();
+      const handler = (resp: { url(): string; status(): number }) => {
+        const u = resp.url();
+        if (/message|chat|comment|replay/i.test(u)) {
+          urls.add(`${resp.status()} ${u}`);
+        }
+      };
+      page.on("response", handler);
+      try {
+        // Try to start playback (autoplay is usually blocked until muted).
+        await page
+          .evaluate(() => {
+            const g = globalThis as unknown as {
+              document?: {
+                querySelector(s: string): {
+                  muted?: boolean;
+                  play?: () => unknown;
+                  click?: () => unknown;
+                } | null;
+              };
+            };
+            const v = g.document?.querySelector("video");
+            if (v) {
+              v.muted = true;
+              v.play?.();
+            }
+            const btn =
+              g.document?.querySelector('[data-testid*="play"]') ||
+              g.document?.querySelector('button[aria-label*="lay"]');
+            btn?.click?.();
+          })
+          .catch(() => {});
+        await page.waitForTimeout(seconds * 1000);
+      } finally {
+        page.off("response", handler);
+      }
+      return [...urls];
     },
     async close() {
       await context.close().catch(() => {});
