@@ -140,17 +140,42 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return null;
   }
 
-  // Find the object that IS the VOD, matched by its UUID (avoids matching the
-  // channel object, which also has a `livestream` field).
-  function findByUuid(node: unknown, uuid: string, depth = 0): VideoData | undefined {
-    if (depth > 8 || !node || typeof node !== "object") return undefined;
+  // Match the VOD inside any Kick response. Kick's videos list keys VODs by a
+  // numeric `id` and a `slug` that begins with the URL UUID's first segment
+  // (e.g. slug "019ee534-some-title" for UUID 019ee534-…), so match on that.
+  function findVod(node: unknown, videoId: string, depth = 0): VideoData | undefined {
+    if (depth > 9 || !node || typeof node !== "object") return undefined;
+    if (Array.isArray(node)) {
+      for (const el of node) {
+        const f = findVod(el, videoId, depth + 1);
+        if (f) return f;
+      }
+      return undefined;
+    }
     const o = node as Record<string, unknown>;
-    if (o["uuid"] === uuid || o["id"] === uuid) return o as VideoData;
+    const short = videoId.split("-")[0];
+    const slug = typeof o["slug"] === "string" ? (o["slug"] as string) : "";
+    const isMatch =
+      o["uuid"] === videoId ||
+      String(o["id"]) === videoId ||
+      (short.length >= 6 && slug.startsWith(short));
+    if (isMatch && ("duration" in o || "start_time" in o || "session_title" in o)) {
+      return o as VideoData;
+    }
     for (const v of Object.values(o)) {
-      const f = findByUuid(v, uuid, depth + 1);
+      const f = findVod(v, videoId, depth + 1);
       if (f) return f;
     }
     return undefined;
+  }
+
+  // Kick timestamps look like "2026-06-20 13:24:12" and are UTC.
+  function parseKickTime(s: string | undefined): number {
+    if (!s) return 0;
+    const hasTz = /[Zz]|[+-]\d\d:?\d\d$/.test(s);
+    const iso = (s.includes("T") ? s : s.replace(" ", "T")) + (hasTz ? "" : "Z");
+    const t = Date.parse(iso);
+    return Number.isNaN(t) ? 0 : t / 1000;
   }
 
   // Deep-search a (VOD-scoped) object for a numeric/string field by name.
@@ -281,7 +306,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         probeResults.push(`${r.status} ${ep.replace("https://kick.com", "")}`);
         if (r.status === 200 && r.json) {
           // Strict: only the object whose uuid matches this VOD.
-          const match = findByUuid(r.json, parsed.videoId);
+          const match = findVod(r.json, parsed.videoId);
           if (match) {
             videoData = match;
             metaSource = ep.replace("https://kick.com", "");
@@ -348,7 +373,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     // Kick's duration is sometimes ms, sometimes seconds — normalize by size.
     const rawDuration = deepNumber(videoData, "duration") ?? 0;
     const durationSecs = rawDuration >= 100_000 ? rawDuration / 1000 : rawDuration;
-    const startUnix = rawStartTime ? Date.parse(rawStartTime) / 1000 : 0;
+    const startUnix = parseKickTime(rawStartTime);
 
     if (durationSecs <= 0) {
       const dump = metaRaw || JSON.stringify(videoData).slice(0, 600);

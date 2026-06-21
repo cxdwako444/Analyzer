@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v18 · 2026-06-21 · Kick flight scan-all + videos-list dump";
+const BUILD_VERSION = "v19 · 2026-06-21 · Kick VOD matched by slug-prefix from videos list";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
