@@ -10,13 +10,18 @@ import { normalizeProxy } from "./proxy";
 export interface KickBrowserSession {
   fetchJson(url: string): Promise<{ status: number; json: unknown | null; text: string }>;
   /**
-   * Navigate to `url` and capture every `/api/` response the page fires. Lets
-   * us read whatever endpoints Kick's own frontend uses instead of guessing.
+   * Navigate to `url` and capture network responses + page state. Lets us see
+   * exactly what data source Kick's frontend uses instead of guessing.
    */
   gotoCapture(
     url: string,
     opts?: { settleMs?: number },
-  ): Promise<Array<{ url: string; status: number; json: unknown | null }>>;
+  ): Promise<{
+    responses: Array<{ url: string; status: number; contentType: string; json: unknown | null }>;
+    pageUrl: string;
+    title: string;
+    embedded: unknown | null;
+  }>;
   close(): Promise<void>;
 }
 
@@ -148,37 +153,79 @@ export async function openKickSession(
       return { status: result.status, json, text: result.text };
     },
     async gotoCapture(url: string, opts: { settleMs?: number } = {}) {
-      const captured: Array<{ url: string; status: number; json: unknown | null }> = [];
+      const responses: Array<{
+        url: string;
+        status: number;
+        contentType: string;
+        json: unknown | null;
+      }> = [];
       const handler = (resp: {
         url(): string;
         status(): number;
+        headers(): Record<string, string>;
         text(): Promise<string>;
       }) => {
         const u = resp.url();
-        if (!u.includes("/api/")) return;
+        const ct = (resp.headers()["content-type"] ?? "").toLowerCase();
+        // Skip static assets to keep the capture readable
+        if (/\.(js|css|png|jpe?g|gif|svg|webp|woff2?|ico|mp4|ts|m3u8)(\?|$)/i.test(u))
+          return;
+        const isJson = ct.includes("json");
+        if (!isJson && !u.includes("/api")) return;
         void resp
           .text()
           .then((t) => {
             let json: unknown = null;
-            try {
-              json = JSON.parse(t);
-            } catch {
-              /* non-JSON */
+            if (isJson) {
+              try {
+                json = JSON.parse(t);
+              } catch {
+                /* ignore */
+              }
             }
-            captured.push({ url: u, status: resp.status(), json });
+            responses.push({ url: u, status: resp.status(), contentType: ct, json });
           })
           .catch(() => {});
       };
       page.on("response", handler);
       try {
         await page
-          .goto(url, { waitUntil: "networkidle", timeout: 45_000 })
+          .goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 })
           .catch(() => {});
-        await page.waitForTimeout(opts.settleMs ?? 2500);
+        await page.waitForTimeout(opts.settleMs ?? 5000);
       } finally {
         page.off("response", handler);
       }
-      return captured;
+
+      // Many SPA frameworks embed initial state in the HTML — grab common spots.
+      const embedded = await page
+        .evaluate(() => {
+          // Runs in the browser; access DOM/window via globalThis to keep the
+          // Node typechecker happy without pulling in the DOM lib.
+          const g = globalThis as unknown as Record<string, unknown> & {
+            document?: {
+              querySelectorAll(sel: string): Array<{ textContent: string | null }>;
+            };
+          };
+          const out: Record<string, unknown> = {};
+          for (const key of ["__NEXT_DATA__", "__NUXT__", "__remixContext"]) {
+            if (g[key]) out[key] = g[key];
+          }
+          const nodes = g.document
+            ? Array.from(g.document.querySelectorAll('script[type="application/json"]'))
+            : [];
+          const jsonScripts = nodes
+            .map((s) => s.textContent || "")
+            .filter(Boolean)
+            .slice(0, 5);
+          if (jsonScripts.length) out["jsonScripts"] = jsonScripts;
+          return out;
+        })
+        .catch(() => null);
+
+      const pageUrl = page.url();
+      const title = await page.title().catch(() => "");
+      return { responses, pageUrl, title, embedded };
     },
     async close() {
       await context.close().catch(() => {});

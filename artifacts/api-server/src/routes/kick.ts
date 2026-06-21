@@ -94,7 +94,22 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
   function looksLikeVideo(json: unknown): json is VideoData {
     if (!json || typeof json !== "object") return false;
     const o = json as Record<string, unknown>;
-    return "duration" in o || "livestream" in o || "uuid" in o;
+    // Require a duration AND some time/channel info to avoid false positives.
+    const hasDuration = "duration" in o || "livestream" in o;
+    const hasContext =
+      "start_time" in o || "channel" in o || "livestream" in o || "uuid" in o;
+    return hasDuration && hasContext;
+  }
+
+  // Recursively search an embedded-state tree for a video-shaped object.
+  function findVideoInTree(node: unknown, depth = 0): VideoData | undefined {
+    if (depth > 6 || !node || typeof node !== "object") return undefined;
+    if (looksLikeVideo(node)) return node;
+    for (const value of Object.values(node as Record<string, unknown>)) {
+      const found = findVideoInTree(value, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   try {
@@ -104,17 +119,24 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     // changes their API).
     sseWrite(res, { type: "progress", count: 0, status: "Loading VOD page & resolving metadata…" });
 
-    const captures = await session.gotoCapture(rawUrl, { settleMs: 3500 });
-    let videoData: VideoData | undefined = captures.find(
+    const cap = await session.gotoCapture(rawUrl, { settleMs: 5000 });
+
+    // Look for metadata in captured network JSON first…
+    let videoData: VideoData | undefined = cap.responses.find(
       (c) => c.status === 200 && looksLikeVideo(c.json),
     )?.json as VideoData | undefined;
 
-    // Fallback: try known direct endpoints
+    // …then in embedded page state (Kick may server-render the data)…
+    if (!videoData && cap.embedded) {
+      const found = findVideoInTree(cap.embedded);
+      if (found) videoData = found;
+    }
+
+    // …then fall back to known direct endpoints.
     if (!videoData) {
       for (const ep of [
         `https://kick.com/api/v1/video/${parsed.videoId}`,
         `https://kick.com/api/v2/video/${parsed.videoId}`,
-        `https://kick.com/api/v1/video/${parsed.videoId}/`,
       ]) {
         const r = await session.fetchJson(ep);
         if (r.status === 200 && looksLikeVideo(r.json)) {
@@ -125,18 +147,18 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     }
 
     if (!videoData) {
-      // Surface which /api/ endpoints the page actually hit so we can adapt.
-      const seen = captures
+      // Surface everything we saw so we can adapt to Kick's current API.
+      const seen = cap.responses
         .map((c) => `${c.status} ${c.url}`)
-        .slice(0, 12)
+        .slice(0, 15)
         .join(" | ");
+      const embeddedKeys =
+        cap.embedded && typeof cap.embedded === "object"
+          ? Object.keys(cap.embedded as object).join(",")
+          : "none";
       sseWrite(res, {
         type: "error",
-        message: `Couldn't find Kick VOD metadata. ${
-          seen
-            ? `API endpoints the page called: ${seen}`
-            : "The page made no /api/ calls — the VOD URL may be wrong or geo-blocked."
-        }`,
+        message: `Couldn't find Kick VOD metadata. landed on "${cap.pageUrl}" (title: "${cap.title}"). embedded: ${embeddedKeys}. responses: ${seen || "none"}`,
       });
       throw new Error("no-metadata");
     }
