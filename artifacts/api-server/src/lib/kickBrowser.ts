@@ -9,6 +9,14 @@ import { normalizeProxy } from "./proxy";
  */
 export interface KickBrowserSession {
   fetchJson(url: string): Promise<{ status: number; json: unknown | null; text: string }>;
+  /**
+   * Navigate to `url` and capture every `/api/` response the page fires. Lets
+   * us read whatever endpoints Kick's own frontend uses instead of guessing.
+   */
+  gotoCapture(
+    url: string,
+    opts?: { settleMs?: number },
+  ): Promise<Array<{ url: string; status: number; json: unknown | null }>>;
   close(): Promise<void>;
 }
 
@@ -138,6 +146,39 @@ export async function openKickSession(
         /* not JSON (e.g. a Cloudflare HTML challenge page) */
       }
       return { status: result.status, json, text: result.text };
+    },
+    async gotoCapture(url: string, opts: { settleMs?: number } = {}) {
+      const captured: Array<{ url: string; status: number; json: unknown | null }> = [];
+      const handler = (resp: {
+        url(): string;
+        status(): number;
+        text(): Promise<string>;
+      }) => {
+        const u = resp.url();
+        if (!u.includes("/api/")) return;
+        void resp
+          .text()
+          .then((t) => {
+            let json: unknown = null;
+            try {
+              json = JSON.parse(t);
+            } catch {
+              /* non-JSON */
+            }
+            captured.push({ url: u, status: resp.status(), json });
+          })
+          .catch(() => {});
+      };
+      page.on("response", handler);
+      try {
+        await page
+          .goto(url, { waitUntil: "networkidle", timeout: 45_000 })
+          .catch(() => {});
+        await page.waitForTimeout(opts.settleMs ?? 2500);
+      } finally {
+        page.off("response", handler);
+      }
+      return captured;
     },
     async close() {
       await context.close().catch(() => {});

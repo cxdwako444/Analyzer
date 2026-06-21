@@ -78,46 +78,68 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return;
   }
 
+  type VideoData = {
+    id?: string | number;
+    uuid?: string;
+    duration?: number;
+    start_time?: string;
+    channel?: { slug?: string };
+    livestream?: {
+      channel?: { slug?: string };
+      start_time?: string;
+      duration?: number;
+    };
+  };
+
+  function looksLikeVideo(json: unknown): json is VideoData {
+    if (!json || typeof json !== "object") return false;
+    const o = json as Record<string, unknown>;
+    return "duration" in o || "livestream" in o || "uuid" in o;
+  }
+
   try {
     // ── Step 1: resolve video metadata ──────────────────────────────────────
-    sseWrite(res, { type: "progress", count: 0, status: "Resolving VOD metadata…" });
+    // Load the real VOD page and capture whatever video API Kick's frontend
+    // calls — more reliable than guessing the endpoint (which 404s when Kick
+    // changes their API).
+    sseWrite(res, { type: "progress", count: 0, status: "Loading VOD page & resolving metadata…" });
 
-    const meta = await session.fetchJson(
-      `https://kick.com/api/v1/video/${parsed.videoId}`,
-    );
+    const captures = await session.gotoCapture(rawUrl, { settleMs: 3500 });
+    let videoData: VideoData | undefined = captures.find(
+      (c) => c.status === 200 && looksLikeVideo(c.json),
+    )?.json as VideoData | undefined;
 
-    if (meta.status === 403 || meta.status === 429 || meta.status === 503) {
-      sseWrite(res, {
-        type: "error",
-        message: `Kick/Cloudflare returned HTTP ${meta.status} even through the headless browser.${
-          proxy
-            ? " Try a different residential proxy — this IP may be flagged."
-            : " Try again, or add a residential proxy in the Kick panel."
-        }`,
-      });
-      throw new Error("blocked");
+    // Fallback: try known direct endpoints
+    if (!videoData) {
+      for (const ep of [
+        `https://kick.com/api/v1/video/${parsed.videoId}`,
+        `https://kick.com/api/v2/video/${parsed.videoId}`,
+        `https://kick.com/api/v1/video/${parsed.videoId}/`,
+      ]) {
+        const r = await session.fetchJson(ep);
+        if (r.status === 200 && looksLikeVideo(r.json)) {
+          videoData = r.json as VideoData;
+          break;
+        }
+      }
     }
 
-    if (meta.status !== 200 || !meta.json) {
+    if (!videoData) {
+      // Surface which /api/ endpoints the page actually hit so we can adapt.
+      const seen = captures
+        .map((c) => `${c.status} ${c.url}`)
+        .slice(0, 12)
+        .join(" | ");
       sseWrite(res, {
         type: "error",
-        message: `Could not load Kick VOD metadata (HTTP ${meta.status}). Check the VOD URL.`,
+        message: `Couldn't find Kick VOD metadata. ${
+          seen
+            ? `API endpoints the page called: ${seen}`
+            : "The page made no /api/ calls — the VOD URL may be wrong or geo-blocked."
+        }`,
       });
       throw new Error("no-metadata");
     }
-
-    const videoData = meta.json as {
-      id?: string | number;
-      uuid?: string;
-      duration?: number;
-      start_time?: string;
-      channel?: { slug?: string };
-      livestream?: {
-        channel?: { slug?: string };
-        start_time?: string;
-        duration?: number;
-      };
-    };
 
     const channelSlug =
       videoData.channel?.slug ??
