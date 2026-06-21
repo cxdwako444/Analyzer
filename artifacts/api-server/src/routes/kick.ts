@@ -237,16 +237,37 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       if (r.data) videoData = r.data;
     }
 
-    // …then fall back to known direct endpoints.
+    // …then probe candidate Kick API endpoints from inside the browser. The
+    // API is reachable there (a prior probe returned a JSON 500, not a 403);
+    // we just need the current video endpoint since api/v1/video/{uuid} 404s.
+    const probeResults: string[] = [];
     if (!videoData) {
-      for (const ep of [
+      const slug = parsed.channel || "";
+      const candidates = [
         `https://kick.com/api/v1/video/${parsed.videoId}`,
         `https://kick.com/api/v2/video/${parsed.videoId}`,
-      ]) {
+        ...(slug
+          ? [
+              `https://kick.com/api/v2/channels/${slug}/videos/${parsed.videoId}`,
+              `https://kick.com/api/v1/channels/${slug}/videos/${parsed.videoId}`,
+              `https://kick.com/api/v2/channels/${slug}`,
+              `https://kick.com/api/v2/channels/${slug}/videos`,
+            ]
+          : []),
+      ];
+      for (const ep of candidates) {
         const r = await session.fetchJson(ep);
-        if (r.status === 200 && looksLikeVideo(r.json)) {
-          videoData = r.json as VideoData;
-          break;
+        probeResults.push(`${r.status} ${ep.replace("https://kick.com", "")}`);
+        if (r.status === 200 && r.json) {
+          if (looksLikeVideo(r.json)) {
+            videoData = r.json as VideoData;
+            break;
+          }
+          const found = findVideoInTree(r.json);
+          if (found) {
+            videoData = found;
+            break;
+          }
         }
       }
     }
@@ -261,21 +282,21 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         cap.embedded && typeof cap.embedded === "object"
           ? Object.keys(cap.embedded as object).join(",")
           : "none";
-      const html = cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 200);
-      // If we have flight data but couldn't parse it, show the region around a
-      // likely video field so we can adjust the extractor.
-      const durIdx = flight.indexOf('"duration"');
+      const html = cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 120);
+      // Find the uuid in flight to show the region around it (real video data).
+      const uidx = flight.indexOf(parsed.videoId);
       const flightInfo = flight
         ? `flightLen=${flight.length} ${
-            durIdx >= 0
-              ? `near-duration="${flight.slice(Math.max(0, durIdx - 200), durIdx + 200)}"`
-              : `head="${flight.slice(0, 300)}"`
+            uidx >= 0
+              ? `near-uuid="${flight.slice(Math.max(0, uidx - 100), uidx + 300)}"`
+              : "uuid-not-in-flight"
           }`
         : "flight=none";
       sseWrite(res, {
         type: "error",
         message:
           `Couldn't find Kick VOD metadata. nav=${cap.navStatus}${cap.navError ? ` navErr=${cap.navError}` : ""} ` +
+          `probes=[${probeResults.join(" | ") || "none"}] ` +
           `title="${cap.title}" embedded=${embeddedKeys} ${flightInfo} ` +
           `failed=${cap.failed.length ? cap.failed.slice(0, 4).join(" ; ") : "none"} ` +
           `responses=${seen || "none"} html="${html}"`,
