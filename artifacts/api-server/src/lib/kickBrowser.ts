@@ -10,14 +10,18 @@ import { normalizeProxy } from "./proxy";
 export interface KickBrowserSession {
   fetchJson(url: string): Promise<{ status: number; json: unknown | null; text: string }>;
   /**
-   * Navigate to `url` and capture network responses + page state. Lets us see
-   * exactly what data source Kick's frontend uses instead of guessing.
+   * Navigate to `url`, give any Cloudflare challenge time to resolve, and
+   * capture rich diagnostics about what actually loaded.
    */
   gotoCapture(
     url: string,
     opts?: { settleMs?: number },
   ): Promise<{
     responses: Array<{ url: string; status: number; contentType: string; json: unknown | null }>;
+    failed: string[];
+    navStatus: number;
+    navError: string;
+    htmlSnippet: string;
     pageUrl: string;
     title: string;
     embedded: unknown | null;
@@ -159,6 +163,7 @@ export async function openKickSession(
         contentType: string;
         json: unknown | null;
       }> = [];
+      const failed: string[] = [];
       const handler = (resp: {
         url(): string;
         status(): number;
@@ -167,11 +172,10 @@ export async function openKickSession(
       }) => {
         const u = resp.url();
         const ct = (resp.headers()["content-type"] ?? "").toLowerCase();
-        // Skip static assets to keep the capture readable
-        if (/\.(js|css|png|jpe?g|gif|svg|webp|woff2?|ico|mp4|ts|m3u8)(\?|$)/i.test(u))
+        // Skip only heavy static assets; keep documents + data/XHR responses.
+        if (/\.(css|png|jpe?g|gif|svg|webp|woff2?|ico|mp4|ts|m3u8)(\?|$)/i.test(u))
           return;
         const isJson = ct.includes("json");
-        if (!isJson && !u.includes("/api")) return;
         void resp
           .text()
           .then((t) => {
@@ -187,15 +191,41 @@ export async function openKickSession(
           })
           .catch(() => {});
       };
+      const failHandler = (req: {
+        url(): string;
+        failure(): { errorText: string } | null;
+      }) => {
+        failed.push(`${req.url()} (${req.failure()?.errorText ?? "failed"})`);
+      };
       page.on("response", handler);
+      page.on("requestfailed", failHandler);
+      let navStatus = 0;
+      let navError = "";
       try {
-        await page
-          .goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 })
-          .catch(() => {});
-        await page.waitForTimeout(opts.settleMs ?? 5000);
+        const resp = await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 45_000,
+        });
+        navStatus = resp ? resp.status() : 0;
+      } catch (e) {
+        navError = String(e);
+      }
+      // Give a Cloudflare JS challenge time to clear: poll until the title is
+      // real (not a challenge interstitial) or we time out.
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const t = await page.title().catch(() => "");
+        if (t && !/just a moment|attention required|checking your browser/i.test(t))
+          break;
+        await page.waitForTimeout(1000);
+      }
+      try {
+        await page.waitForTimeout(opts.settleMs ?? 3000);
       } finally {
         page.off("response", handler);
+        page.off("requestfailed", failHandler);
       }
+      const htmlSnippet = (await page.content().catch(() => "")).slice(0, 700);
 
       // Many SPA frameworks embed initial state in the HTML — grab common spots.
       const embedded = await page
@@ -225,7 +255,7 @@ export async function openKickSession(
 
       const pageUrl = page.url();
       const title = await page.title().catch(() => "");
-      return { responses, pageUrl, title, embedded };
+      return { responses, failed, navStatus, navError, htmlSnippet, pageUrl, title, embedded };
     },
     async close() {
       await context.close().catch(() => {});

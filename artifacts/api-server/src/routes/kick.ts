@@ -156,9 +156,14 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         cap.embedded && typeof cap.embedded === "object"
           ? Object.keys(cap.embedded as object).join(",")
           : "none";
+      const html = cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 300);
       sseWrite(res, {
         type: "error",
-        message: `Couldn't find Kick VOD metadata. landed on "${cap.pageUrl}" (title: "${cap.title}"). embedded: ${embeddedKeys}. responses: ${seen || "none"}`,
+        message:
+          `Couldn't find Kick VOD metadata. nav=${cap.navStatus}${cap.navError ? ` navErr=${cap.navError}` : ""} ` +
+          `title="${cap.title}" embedded=${embeddedKeys} ` +
+          `failed=${cap.failed.length ? cap.failed.slice(0, 4).join(" ; ") : "none"} ` +
+          `responses=${seen || "none"} html="${html}"`,
       });
       throw new Error("no-metadata");
     }

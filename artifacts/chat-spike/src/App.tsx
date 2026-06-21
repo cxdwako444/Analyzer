@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v10 · 2026-06-21 · Kick deep capture (network + embedded state)";
+const BUILD_VERSION = "v11 · 2026-06-21 · Kick full nav diagnostics + Cloudflare wait";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
