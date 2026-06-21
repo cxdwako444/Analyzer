@@ -140,8 +140,18 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return null;
   }
 
-  // Find the real video object in Next.js flight data via the VOD's UUID, so we
-  // read the correct duration/start_time (not some unrelated "duration" field).
+  // Find the object that IS the VOD, matched by its UUID (avoids matching the
+  // channel object, which also has a `livestream` field).
+  function findByUuid(node: unknown, uuid: string, depth = 0): VideoData | undefined {
+    if (depth > 8 || !node || typeof node !== "object") return undefined;
+    const o = node as Record<string, unknown>;
+    if (o["uuid"] === uuid || o["id"] === uuid) return o as VideoData;
+    for (const v of Object.values(o)) {
+      const f = findByUuid(v, uuid, depth + 1);
+      if (f) return f;
+    }
+    return undefined;
+  }
   function extractVideoFromFlight(
     flight: string,
     videoId: string,
@@ -241,6 +251,8 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     // API is reachable there (a prior probe returned a JSON 500, not a 403);
     // we just need the current video endpoint since api/v1/video/{uuid} 404s.
     const probeResults: string[] = [];
+    let metaSource = videoData ? "flight" : "";
+    let metaRaw = "";
     if (!videoData) {
       const slug = parsed.channel || "";
       const candidates = [
@@ -259,13 +271,14 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         const r = await session.fetchJson(ep);
         probeResults.push(`${r.status} ${ep.replace("https://kick.com", "")}`);
         if (r.status === 200 && r.json) {
-          if (looksLikeVideo(r.json)) {
-            videoData = r.json as VideoData;
-            break;
-          }
-          const found = findVideoInTree(r.json);
-          if (found) {
-            videoData = found;
+          // Prefer the object matched by UUID, then video-shaped objects.
+          const match =
+            findByUuid(r.json, parsed.videoId) ??
+            (looksLikeVideo(r.json) ? (r.json as VideoData) : findVideoInTree(r.json));
+          if (match) {
+            videoData = match;
+            metaSource = ep.replace("https://kick.com", "");
+            metaRaw = JSON.stringify(match).slice(0, 600);
             break;
           }
         }
@@ -324,9 +337,10 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     const startUnix = rawStartTime ? Date.parse(rawStartTime) / 1000 : 0;
 
     if (durationSecs <= 0) {
+      const dump = metaRaw || JSON.stringify(videoData).slice(0, 600);
       sseWrite(res, {
         type: "error",
-        message: "Could not determine VOD duration from Kick metadata.",
+        message: `Found VOD metadata (source=${metaSource || "?"}) but no usable duration. object=${dump}`,
       });
       throw new Error("no-duration");
     }
