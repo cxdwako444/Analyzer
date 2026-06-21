@@ -43,7 +43,10 @@ function parseKickUrl(url: string): { videoId: string; channel: string } | null 
   return null;
 }
 
-type FetchFn = (url: string, opts?: object) => Promise<Response>;
+// Note: `Response` from "express" is imported above and shadows the global
+// fetch Response, so reference the global one explicitly here.
+type FetchResponse = globalThis.Response;
+type FetchFn = (url: string, opts?: object) => Promise<FetchResponse>;
 
 function makeFetcher(proxyUrl: string | null): FetchFn {
   if (!proxyUrl) {
@@ -56,7 +59,7 @@ function makeFetcher(proxyUrl: string | null): FetchFn {
       dispatcher: agent,
     });
     // undici response is compatible with the Fetch API
-    return resp as unknown as Response;
+    return resp as unknown as FetchResponse;
   };
 }
 
@@ -94,7 +97,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     // ── Step 1: resolve video metadata ──────────────────────────────────────
     sseWrite(res, { type: "progress", count: 0, status: "Resolving VOD metadata…" });
 
-    let videoResp: Response;
+    let videoResp: FetchResponse;
     try {
       videoResp = await kickFetch(
         `https://kick.com/api/v1/video/${parsed.videoId}`,
@@ -199,7 +202,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       const windowStart = startUnix + w * WINDOW;
       const windowEnd = windowStart + WINDOW;
 
-      let chunkResp: Response;
+      let chunkResp: FetchResponse;
       try {
         const url =
           `https://kick.com/api/v2/channels/${channelSlug}/messages` +
