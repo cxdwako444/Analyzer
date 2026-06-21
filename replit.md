@@ -34,7 +34,9 @@ _Describe the high-level user-facing capabilities of this app once they exist._
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- On EVERY change, bump `BUILD_VERSION` in `artifacts/chat-spike/src/App.tsx`. A
+  green "✅ UPDATED — <version>" banner at the top of the screen renders it, so
+  the user can visually confirm a fresh deploy is live.
 
 ## Gotchas
 

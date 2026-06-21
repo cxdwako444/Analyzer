@@ -22,6 +22,10 @@ const BUCKET_SIZES = [5, 10, 15, 30, 60, 120];
 type InputMode = "file" | "twitch" | "kick";
 type ResultTab = "timeline" | "virality";
 
+// BUILD_VERSION — bump this on EVERY change so the banner at the top of the
+// screen visibly confirms a new version is live after each deploy.
+const BUILD_VERSION = "v3 · 2026-06-21 · Twitch cursor paging + SSE keepalive";
+
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="flex flex-col gap-1 bg-white/[0.04] rounded-xl px-4 py-3 border border-white/[0.06]">
@@ -240,6 +244,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0e0e1a] text-white">
+      {/* Update banner — confirms a fresh deploy is live (see BUILD_VERSION) */}
+      <div className="w-full bg-emerald-500 text-black text-center text-xs font-bold py-1.5 px-2 tracking-wide">
+        ✅ UPDATED — {BUILD_VERSION}
+      </div>
+
       {/* Header */}
       <header className="border-b border-white/[0.06] bg-[#0e0e1a]/80 backdrop-blur-sm sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">

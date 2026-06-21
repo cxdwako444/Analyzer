@@ -90,6 +90,12 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
   res.socket?.setNoDelay(true);
   res.flushHeaders();
 
+  // Immediate response + heartbeats so the gateway doesn't 502 a long fetch.
+  res.write(": connected\n\n");
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(": keepalive\n\n");
+  }, 15_000);
+
   const kickFetch = makeFetcher(proxyUrl);
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
 
@@ -272,6 +278,8 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     sseWrite(res, { type: "done", messages, totalCount: messages.length });
   } catch (err) {
     sseWrite(res, { type: "error", message: String(err) });
+  } finally {
+    clearInterval(heartbeat);
   }
 
   res.end();

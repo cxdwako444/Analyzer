@@ -55,6 +55,14 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
   res.socket?.setNoDelay(true);
   res.flushHeaders();
 
+  // Send an immediate comment so the gateway sees a 200 response right away,
+  // then keep the connection warm with heartbeats. Long VOD fetches can
+  // otherwise look idle to the proxy and get killed with a 502 Bad Gateway.
+  res.write(": connected\n\n");
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(": keepalive\n\n");
+  }, 15_000);
+
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
 
   // Pagination state.
@@ -239,6 +247,8 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
     });
   } catch (err) {
     sseWrite(res, { type: "error", message: String(err) });
+  } finally {
+    clearInterval(heartbeat);
   }
 
   res.end();
