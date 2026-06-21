@@ -1,26 +1,8 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { makeFetcher, type FetchResponse } from "../lib/proxy";
+import { openKickSession, type KickBrowserSession } from "../lib/kickBrowser";
 
 const router = Router();
-
-const BROWSER_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  Referer: "https://kick.com/",
-  Origin: "https://kick.com",
-  "sec-ch-ua": '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
-  "sec-ch-ua-mobile": "?0",
-  "sec-ch-ua-platform": '"Windows"',
-  "sec-fetch-dest": "empty",
-  "sec-fetch-mode": "cors",
-  "sec-fetch-site": "same-origin",
-  "Cache-Control": "no-cache",
-  Pragma: "no-cache",
-};
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,9 +39,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
     return;
   }
 
-  const { fetch: kickFetch, proxyUrl } = makeFetcher(
-    typeof rawProxy === "string" ? rawProxy : null,
-  );
+  const proxy = typeof rawProxy === "string" && rawProxy.trim() ? rawProxy.trim() : null;
 
   // Set up SSE
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -77,51 +57,56 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
 
   const messages: Array<{ timestamp: number; user: string; text: string }> = [];
 
+  // ── Launch the headless browser to clear Cloudflare ──────────────────────
+  let session: KickBrowserSession;
+  try {
+    sseWrite(res, {
+      type: "progress",
+      count: 0,
+      status: proxy
+        ? "Launching headless browser via proxy (passing Cloudflare)…"
+        : "Launching headless browser (passing Cloudflare)…",
+    });
+    session = await openKickSession({ proxy });
+  } catch (err) {
+    sseWrite(res, {
+      type: "error",
+      message: err instanceof Error ? err.message : String(err),
+    });
+    clearInterval(heartbeat);
+    res.end();
+    return;
+  }
+
   try {
     // ── Step 1: resolve video metadata ──────────────────────────────────────
     sseWrite(res, { type: "progress", count: 0, status: "Resolving VOD metadata…" });
 
-    let videoResp: FetchResponse;
-    try {
-      videoResp = await kickFetch(
-        `https://kick.com/api/v1/video/${parsed.videoId}`,
-        {
-          headers: BROWSER_HEADERS,
-          signal: AbortSignal.timeout(20_000),
-        }
-      );
-    } catch (err) {
-      const msg = proxyUrl
-        ? `Could not reach Kick API through proxy (${proxyUrl}): ${String(err)}`
-        : `Could not reach Kick API: ${String(err)}. Kick requires a proxy to bypass Cloudflare — paste one in the Proxy field.`;
-      sseWrite(res, { type: "error", message: msg });
-      res.end();
-      return;
-    }
+    const meta = await session.fetchJson(
+      `https://kick.com/api/v1/video/${parsed.videoId}`,
+    );
 
-    if (videoResp.status === 403 || videoResp.status === 429 || videoResp.status === 503) {
+    if (meta.status === 403 || meta.status === 429 || meta.status === 503) {
       sseWrite(res, {
         type: "error",
-        message: `Kick returned HTTP ${videoResp.status} — Cloudflare blocked the request. ${
-          proxyUrl
-            ? "Your proxy IS being used, but a plain residential IP usually isn't enough for Kick: Cloudflare also fingerprints the TLS/browser, which a server can't fake. Use a Cloudflare-solving 'unblocker'/'site unlocker' endpoint (Decodo Site Unblocker, Bright Data Web Unlocker, ScraperAPI, ZenRows) instead of a raw proxy."
-            : "Add a proxy in the Kick panel — but note Kick's Cloudflare usually needs a Cloudflare-solving 'unblocker' endpoint, not just a raw residential proxy."
+        message: `Kick/Cloudflare returned HTTP ${meta.status} even through the headless browser.${
+          proxy
+            ? " Try a different residential proxy — this IP may be flagged."
+            : " Try again, or add a residential proxy in the Kick panel."
         }`,
       });
-      res.end();
-      return;
+      throw new Error("blocked");
     }
 
-    if (!videoResp.ok) {
+    if (meta.status !== 200 || !meta.json) {
       sseWrite(res, {
         type: "error",
-        message: `Kick API returned HTTP ${videoResp.status}. Check the VOD URL.`,
+        message: `Could not load Kick VOD metadata (HTTP ${meta.status}). Check the VOD URL.`,
       });
-      res.end();
-      return;
+      throw new Error("no-metadata");
     }
 
-    let videoData: {
+    const videoData = meta.json as {
       id?: string | number;
       uuid?: string;
       duration?: number;
@@ -133,15 +118,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         duration?: number;
       };
     };
-    try {
-      videoData = (await videoResp.json()) as typeof videoData;
-    } catch {
-      sseWrite(res, { type: "error", message: "Could not parse Kick video metadata JSON." });
-      res.end();
-      return;
-    }
 
-    // Kick's video API can wrap data in `livestream` key
     const channelSlug =
       videoData.channel?.slug ??
       videoData.livestream?.channel?.slug ??
@@ -152,16 +129,12 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         type: "error",
         message: "Could not determine the channel from Kick video metadata. Check the VOD URL.",
       });
-      res.end();
-      return;
+      throw new Error("no-channel");
     }
 
-    const rawStartTime =
-      videoData.start_time ?? videoData.livestream?.start_time;
+    const rawStartTime = videoData.start_time ?? videoData.livestream?.start_time;
     const durationSecs =
       (videoData.duration ?? videoData.livestream?.duration ?? 0) / 1000;
-
-    // start_time is ISO string; convert to unix seconds
     const startUnix = rawStartTime ? Date.parse(rawStartTime) / 1000 : 0;
 
     if (durationSecs <= 0) {
@@ -169,8 +142,7 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         type: "error",
         message: "Could not determine VOD duration from Kick metadata.",
       });
-      res.end();
-      return;
+      throw new Error("no-duration");
     }
 
     // ── Step 2: page through chat replay in 2-min windows ────────────────
@@ -182,62 +154,53 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       status: `Fetching chat for a ${Math.round(durationSecs / 60)}-min VOD…`,
     });
 
+    let blockedStreak = 0;
     for (let w = 0; w < totalWindows && !req.destroyed; w++) {
       const windowStart = startUnix + w * WINDOW;
       const windowEnd = windowStart + WINDOW;
 
-      let chunkResp: FetchResponse;
-      try {
-        const url =
-          `https://kick.com/api/v2/channels/${channelSlug}/messages` +
-          `?start_time=${Math.floor(windowStart)}&end_time=${Math.floor(windowEnd)}`;
-        chunkResp = await kickFetch(url, {
-          headers: BROWSER_HEADERS,
-          signal: AbortSignal.timeout(15_000),
-        });
-      } catch (err) {
-        sseWrite(res, {
-          type: "error",
-          message: `Kick request failed${proxyUrl ? " through proxy" : ""}: ${String(err)}`,
-        });
-        res.end();
-        return;
-      }
+      const url =
+        `https://kick.com/api/v2/channels/${channelSlug}/messages` +
+        `?start_time=${Math.floor(windowStart)}&end_time=${Math.floor(windowEnd)}`;
+      const chunk = await session.fetchJson(url);
 
-      if (chunkResp.status === 403 || chunkResp.status === 503) {
-        sseWrite(res, {
-          type: "ratelimit",
-          message: `Kick returned HTTP ${chunkResp.status} — Cloudflare blocked the chat request. Analyzing the ${messages.length} messages fetched so far.`,
-          count: messages.length,
-        });
-        break;
+      if (chunk.status === 403 || chunk.status === 503 || chunk.status === 429) {
+        // Cloudflare may start blocking mid-run; tolerate a few then bail.
+        blockedStreak++;
+        if (blockedStreak >= 3) {
+          sseWrite(res, {
+            type: "ratelimit",
+            message: `Cloudflare started blocking after ${messages.length} messages. Analyzing what we have.`,
+            count: messages.length,
+          });
+          break;
+        }
+        await sleep(1500);
+        continue;
       }
+      blockedStreak = 0;
 
-      if (!chunkResp.ok) {
-        // Non-fatal: skip this window and continue
-        await sleep(500);
+      if (chunk.status !== 200 || !chunk.json) {
+        // Non-fatal: skip this window
+        await sleep(300);
         continue;
       }
 
-      let chunkData: {
+      const chunkData = chunk.json as {
         data?: Array<{
           created_at?: string;
           content?: string;
           sender?: { username?: string };
         }>;
       };
-      try {
-        chunkData = (await chunkResp.json()) as typeof chunkData;
-      } catch {
-        await sleep(300);
-        continue;
-      }
 
       const rows = chunkData.data ?? [];
       for (const row of rows) {
         const user = row.sender?.username ?? "";
         const text = row.content ?? "";
-        const createdAt = row.created_at ? Date.parse(row.created_at) / 1000 : windowStart;
+        const createdAt = row.created_at
+          ? Date.parse(row.created_at) / 1000
+          : windowStart;
         const timestamp = Math.max(0, createdAt - startUnix);
         messages.push({ timestamp, user, text });
       }
@@ -255,8 +218,13 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
 
     sseWrite(res, { type: "done", messages, totalCount: messages.length });
   } catch (err) {
-    sseWrite(res, { type: "error", message: String(err) });
+    // Errors we surfaced above are thrown to break out; only report unexpected ones.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!["blocked", "no-metadata", "no-channel", "no-duration"].includes(msg)) {
+      sseWrite(res, { type: "error", message: msg });
+    }
   } finally {
+    await session.close();
     clearInterval(heartbeat);
   }
 
