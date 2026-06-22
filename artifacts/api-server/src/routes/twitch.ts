@@ -99,10 +99,11 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
           "Client-Id": TWITCH_CLIENT_ID,
           "Device-ID": deviceId,
           "X-Device-Id": deviceId,
-          "Content-Type": "application/json",
         },
         body: "",
-        credentials: "include",
+        // omit credentials: Twitch returns ACAO:* which the browser rejects
+        // when credentials are included (causes "Failed to fetch").
+        credentials: "omit",
       });
       try {
         const parsed = JSON.parse(ir.text) as { token?: string };
