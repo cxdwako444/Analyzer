@@ -43,7 +43,27 @@ export async function fetchTwitchChatClient(
   let noNewStreak = 0; // consecutive responses that added nothing new
   let stopReason = "reached end of VOD";
   const diag: string[] = []; // per-page diagnostics for the first few pages
+  let firstCursor: string | null = null; // last-edge cursor from page 1
   const MAX_PAGES = 8000; // safety guard
+
+  // One-shot raw POST helper for cursor probing/diagnostics.
+  async function rawQuery(variables: Record<string, unknown>) {
+    const b = JSON.stringify([
+      {
+        operationName: "VideoCommentsByOffsetOrCursor",
+        variables,
+        extensions: { persistedQuery: { version: 1, sha256Hash: QUERY_HASH } },
+      },
+    ]);
+    const rr = await fetch(TWITCH_GQL, {
+      method: "POST",
+      headers: { "Client-Id": CLIENT_ID, "Content-Type": "application/json" },
+      body: b,
+      signal,
+    });
+    const txt = await rr.text();
+    return { status: rr.status, text: txt };
+  }
 
   onProgress(0, "Fetching directly from your device (no proxy)…");
 
@@ -158,6 +178,10 @@ export async function fetchTwitchChatClient(
       if (ts < minTs) minTs = ts;
     }
 
+    if (firstCursor === null) {
+      firstCursor = edges[edges.length - 1]?.cursor ?? "";
+    }
+
     // Capture what the first few queries actually returned, to see whether
     // contentOffsetSeconds is being honored.
     if (diag.length < 4) {
@@ -190,8 +214,23 @@ export async function fetchTwitchChatClient(
     await sleep(40);
   }
 
+  // If we capped early, probe the cursor a couple of ways and report exactly
+  // what Twitch returns, so we can see why forward pagination dead-ends.
+  let cursorDiag = "";
+  if (messages.length < 500 && firstCursor) {
+    try {
+      const a = await rawQuery({ videoID: videoId, cursor: firstCursor });
+      const aEdges =
+        (JSON.parse(a.text) as Array<{ data?: { video?: { comments?: { edges?: unknown[] } } } }>)[0]
+          ?.data?.video?.comments?.edges?.length ?? "?";
+      cursorDiag += ` cursorA(status=${a.status} edges=${aEdges} raw=${a.text.replace(/\s+/g, " ").slice(0, 140)})`;
+    } catch (e) {
+      cursorDiag += ` cursorA(threw ${String(e).slice(0, 60)})`;
+    }
+  }
+
   onWarning?.(
-    `vod=${videoId} stop="${stopReason}" msgs=${messages.length} pages=${page} | ${diag.join(" ; ")}`,
+    `vod=${videoId} stop="${stopReason}" msgs=${messages.length} pages=${page} | ${diag.join(" ; ")}${cursorDiag}`,
   );
   return messages;
 }
