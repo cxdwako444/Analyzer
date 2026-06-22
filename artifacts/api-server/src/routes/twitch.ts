@@ -91,6 +91,7 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
   try {
     // ── Get a Client-Integrity token (from the twitch.tv page context) ──────
     let integrity = "";
+    let integrityDiag = "no-attempt";
     try {
       const ir = await session.fetchRaw(TWITCH_INTEGRITY, {
         method: "POST",
@@ -104,19 +105,14 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         credentials: "include",
       });
       try {
-        integrity = (JSON.parse(ir.text) as { token?: string }).token ?? "";
+        const parsed = JSON.parse(ir.text) as { token?: string };
+        integrity = parsed.token ?? "";
       } catch {
         /* ignore */
       }
-      if (!integrity) {
-        sseWrite(res, {
-          type: "progress",
-          count: 0,
-          status: `Integrity token not granted (HTTP ${ir.status}) — trying anyway…`,
-        });
-      }
-    } catch {
-      /* proceed without */
+      integrityDiag = `status=${ir.status} tokenLen=${integrity.length} raw=${ir.text.replace(/\s+/g, " ").slice(0, 120)}`;
+    } catch (e) {
+      integrityDiag = `threw ${String(e).slice(0, 80)}`;
     }
 
     // ── Paginate VOD comments using the cursor + integrity token ────────────
@@ -210,7 +206,7 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
         if (messages.length > 0) {
           sseWrite(res, {
             type: "ratelimit",
-            message: `Twitch integrity check failed mid-fetch — analyzing the ${messages.length} messages so far.`,
+            message: `Integrity check failed on pagination. integrity[${integrityDiag}]. Got ${messages.length} msgs.`,
             count: messages.length,
           });
           break;
