@@ -9,6 +9,11 @@ import { normalizeProxy } from "./proxy";
  */
 export interface KickBrowserSession {
   fetchJson(url: string): Promise<{ status: number; json: unknown | null; text: string }>;
+  /** Generic fetch (e.g. POST) executed in the page context. */
+  fetchRaw(
+    url: string,
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
+  ): Promise<{ status: number; text: string }>;
   /**
    * Navigate to `url`, give any Cloudflare challenge time to resolve, and
    * capture rich diagnostics about what actually loaded.
@@ -81,7 +86,7 @@ function toPlaywrightProxy(rawProxy: string | null | undefined) {
 }
 
 export async function openKickSession(
-  opts: { proxy?: string | null } = {},
+  opts: { proxy?: string | null; primeUrl?: string } = {},
 ): Promise<KickBrowserSession> {
   // Dynamic import so a missing install doesn't crash the server at boot —
   // only the Kick route needs it. playwright-core has no bundled browser, so
@@ -151,15 +156,38 @@ export async function openKickSession(
 
   const page = await context.newPage();
 
-  // Prime Cloudflare clearance by loading the site, then give any JS challenge
-  // a moment to resolve before we start hitting the API.
-  await page.goto("https://kick.com/", {
+  // Load the priming page so the session has a real origin, cookies, and (for
+  // Twitch) an integrity token. Defaults to kick.com for Cloudflare clearance.
+  const primeUrl = opts.primeUrl ?? "https://kick.com/";
+  await page.goto(primeUrl, {
     waitUntil: "domcontentloaded",
     timeout: 45_000,
   });
-  await page.waitForTimeout(3500);
+  await page.waitForTimeout(4000);
 
   return {
+    async fetchRaw(
+      url: string,
+      init?: { method?: string; headers?: Record<string, string>; body?: string },
+    ) {
+      return page.evaluate(
+        async ({ u, i }) => {
+          try {
+            const r = await fetch(u, {
+              method: i?.method ?? "GET",
+              headers: i?.headers ?? {},
+              body: i?.body,
+              credentials: "include",
+            });
+            const t = await r.text();
+            return { status: r.status, text: t };
+          } catch (e) {
+            return { status: 0, text: String(e) };
+          }
+        },
+        { u: url, i: init },
+      );
+    },
     async fetchJson(url: string) {
       const result = await page.evaluate(async (u) => {
         try {
