@@ -12,7 +12,12 @@ export interface KickBrowserSession {
   /** Generic fetch (e.g. POST) executed in the page context. */
   fetchRaw(
     url: string,
-    init?: { method?: string; headers?: Record<string, string>; body?: string },
+    init?: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      credentials?: "omit" | "include" | "same-origin";
+    },
   ): Promise<{ status: number; text: string }>;
   /**
    * Navigate to `url`, give any Cloudflare challenge time to resolve, and
@@ -180,7 +185,12 @@ export async function openKickSession(
   return {
     async fetchRaw(
       url: string,
-      init?: { method?: string; headers?: Record<string, string>; body?: string },
+      init?: {
+        method?: string;
+        headers?: Record<string, string>;
+        body?: string;
+        credentials?: "omit" | "include" | "same-origin";
+      },
     ) {
       return page.evaluate(
         async ({ u, i }) => {
@@ -189,7 +199,10 @@ export async function openKickSession(
               method: i?.method ?? "GET",
               headers: i?.headers ?? {},
               body: i?.body,
-              credentials: "include",
+              // Default to omit: cross-origin APIs (e.g. Twitch GQL) send
+              // Access-Control-Allow-Origin:* which the browser rejects if
+              // credentials are included.
+              credentials: i?.credentials ?? "omit",
             });
             const t = await r.text();
             return { status: r.status, text: t };
