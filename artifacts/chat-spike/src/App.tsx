@@ -16,6 +16,7 @@ import SpikeList from "./components/SpikeList";
 import ViralMoments from "./components/ViralMoments";
 import { parseChat, analyzeChat, buildMessagesFromApi } from "./lib/chatParser";
 import { streamFetch } from "./lib/sseStream";
+import { fetchTwitchChatClient } from "./lib/twitchClient";
 import type { AnalysisResult } from "./lib/chatParser";
 
 const BUCKET_SIZES = [5, 10, 15, 30, 60, 120];
@@ -24,7 +25,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v23 · 2026-06-21 · Twitch GQL CORS fix (omit credentials)";
+const BUILD_VERSION = "v24 · 2026-06-21 · Twitch fetched in YOUR browser (no proxy/server)";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -118,7 +119,7 @@ export default function App() {
 
   // ── Twitch fetch ──────────────────────────────────────────────────────────
   const handleTwitchFetch = useCallback(
-    async (videoId: string, proxy: string) => {
+    async (videoId: string) => {
       abortRef.current?.abort();
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -130,15 +131,14 @@ export default function App() {
       setResult(null);
       setIsAnalyzing(false);
 
-      const params = new URLSearchParams({ videoId });
-      if (proxy) params.set("proxy", proxy);
-
       try {
-        const raw = await streamFetch(`/api/twitch-chat?${params.toString()}`, {
-          onProgress: (count, status) => setTwitchProgress({ count, status }),
-          onWarning: (msg) => setTwitchWarning(msg),
-          signal: ctrl.signal,
-        });
+        // Fetch Twitch chat DIRECTLY from the browser (residential/mobile IP) —
+        // no server, no proxy, no datacenter-IP bot-check.
+        const raw = await fetchTwitchChatClient(
+          videoId,
+          (count, status) => setTwitchProgress({ count, status }),
+          ctrl.signal,
+        );
 
         setTwitchProgress({ count: raw.length });
         setTwitchFetching(false);
