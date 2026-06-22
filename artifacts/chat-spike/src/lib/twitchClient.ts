@@ -42,6 +42,7 @@ export async function fetchTwitchChatClient(
   let emptyStreak = 0; // consecutive responses with no edges
   let noNewStreak = 0; // consecutive responses that added nothing new
   let stopReason = "reached end of VOD";
+  const diag: string[] = []; // per-page diagnostics for the first few pages
   const MAX_PAGES = 8000; // safety guard
 
   onProgress(0, "Fetching directly from your device (no proxy)…");
@@ -138,19 +139,31 @@ export async function fetchTwitchChatClient(
     emptyStreak = 0;
 
     let maxTs = offset;
+    let minTs = Infinity;
     let newCount = 0;
+    let withCursor = 0;
     for (const e of edges) {
       const n = e.node;
       const ts = n.content_offset_seconds ?? 0;
       const user = n.commenter?.display_name ?? "";
       const text = (n.message?.fragments ?? []).map((f) => f.text ?? "").join("");
       const id = n.id ?? `${ts}|${user}|${text}`;
+      if (e.cursor) withCursor++;
       if (!seenIds.has(id)) {
         seenIds.add(id);
         messages.push({ timestamp: ts, user, text });
         newCount++;
       }
       if (ts > maxTs) maxTs = ts;
+      if (ts < minTs) minTs = ts;
+    }
+
+    // Capture what the first few queries actually returned, to see whether
+    // contentOffsetSeconds is being honored.
+    if (diag.length < 4) {
+      diag.push(
+        `q@${offset}s→edges=${edges.length} off=[${Math.floor(minTs)}..${Math.floor(maxTs)}] new=${newCount} cur=${withCursor}/${edges.length} id=${edges[0]?.node?.id ? "y" : "n"}`,
+      );
     }
 
     page++;
@@ -177,6 +190,8 @@ export async function fetchTwitchChatClient(
     await sleep(40);
   }
 
-  onWarning?.(`Stopped: ${stopReason} (${messages.length} msgs, ${page} pages)`);
+  onWarning?.(
+    `vod=${videoId} stop="${stopReason}" msgs=${messages.length} pages=${page} | ${diag.join(" ; ")}`,
+  );
   return messages;
 }
