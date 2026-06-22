@@ -128,6 +128,27 @@ export async function openKickSession(
     locale: "en-US",
     proxy: toPlaywrightProxy(opts.proxy),
   });
+
+  // Block heavy/unneeded resources to slash bandwidth — critical for metered
+  // proxies. We only need the HTML document (for Cloudflare clearance) and our
+  // JSON API/XHR calls; images, fonts, CSS, media, Kick's app JS chunks, ads
+  // and analytics are all dead weight here.
+  await context.route("**/*", (route) => {
+    const req = route.request();
+    const type = req.resourceType();
+    const url = req.url();
+    if (type === "image" || type === "font" || type === "media" || type === "stylesheet") {
+      return route.abort();
+    }
+    if (
+      /assets\.kick\.com\/.*\/static\//.test(url) ||
+      /datadoghq|googlesyndication|google-analytics|googletagmanager|doubleclick|\/recaptcha\/|gpt\.js/.test(url)
+    ) {
+      return route.abort();
+    }
+    return route.continue();
+  });
+
   const page = await context.newPage();
 
   // Prime Cloudflare clearance by loading the site, then give any JS challenge

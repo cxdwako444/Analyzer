@@ -246,56 +246,24 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
   }
 
   try {
-    // ── Step 1: resolve video metadata ──────────────────────────────────────
-    // Load the real VOD page and capture whatever video API Kick's frontend
-    // calls — more reliable than guessing the endpoint (which 404s when Kick
-    // changes their API).
-    sseWrite(res, { type: "progress", count: 0, status: "Loading VOD page & resolving metadata…" });
+    // ── Step 1: resolve VOD metadata ────────────────────────────────────────
+    // API-first: the channel videos list returns the VOD (duration +
+    // start_time) and is tiny. Only fall back to loading the heavy VOD page if
+    // the API doesn't have it — this keeps proxy bandwidth minimal.
+    sseWrite(res, { type: "progress", count: 0, status: "Resolving VOD via Kick API…" });
 
-    const cap = await session.gotoCapture(rawUrl, { settleMs: 5000 });
-
-    // Look for metadata in captured network JSON first…
-    let videoData: VideoData | undefined = cap.responses.find(
-      (c) => c.status === 200 && looksLikeVideo(c.json),
-    )?.json as VideoData | undefined;
-
-    // …then in embedded page state (Kick may server-render the data)…
-    if (!videoData && cap.embedded) {
-      const found = findVideoInTree(cap.embedded);
-      if (found) videoData = found;
-    }
-
-    // …then mine the Next.js flight data (SSR'd text) — Kick's data API is
-    // reCAPTCHA-gated, but the page itself ships the video metadata.
-    const flight =
-      cap.embedded &&
-      typeof (cap.embedded as Record<string, unknown>)["flight"] === "string"
-        ? ((cap.embedded as Record<string, unknown>)["flight"] as string)
-        : "";
-    let flightSnippet = "";
-    if (!videoData && flight) {
-      const r = extractVideoFromFlight(flight, parsed.videoId);
-      flightSnippet = r.rawSnippet;
-      if (r.data) videoData = r.data;
-    }
-
-    // …then probe candidate Kick API endpoints from inside the browser. The
-    // API is reachable there (a prior probe returned a JSON 500, not a 403);
-    // we just need the current video endpoint since api/v1/video/{uuid} 404s.
+    let videoData: VideoData | undefined;
     const probeResults: string[] = [];
-    let metaSource = videoData ? "flight" : "";
+    let metaSource = "";
     let metaRaw = "";
     let listDump = "";
-    if (!videoData) {
+    {
       const slug = parsed.channel || "";
-      // Videos-list first (contains the VOD with duration); channel object is
-      // intentionally NOT used here — it isn't the VOD.
       const candidates = [
         ...(slug
           ? [
-              `https://kick.com/api/v2/channels/${slug}/videos/${parsed.videoId}`,
-              `https://kick.com/api/v1/channels/${slug}/videos/${parsed.videoId}`,
               `https://kick.com/api/v2/channels/${slug}/videos`,
+              `https://kick.com/api/v2/channels/${slug}/videos/${parsed.videoId}`,
             ]
           : []),
         `https://kick.com/api/v1/video/${parsed.videoId}`,
@@ -305,7 +273,6 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
         const r = await session.fetchJson(ep);
         probeResults.push(`${r.status} ${ep.replace("https://kick.com", "")}`);
         if (r.status === 200 && r.json) {
-          // Strict: only the object whose uuid matches this VOD.
           const match = findVod(r.json, parsed.videoId);
           if (match) {
             videoData = match;
@@ -313,7 +280,6 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
             metaRaw = JSON.stringify(match).slice(0, 600);
             break;
           }
-          // Keep the videos-list body for diagnostics if the VOD isn't in it.
           if (ep.endsWith("/videos") && !listDump) {
             listDump = JSON.stringify(r.json).slice(0, 600);
           }
@@ -321,38 +287,60 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       }
     }
 
+    // Fallback: only load the (heavy) VOD page if the API didn't resolve it.
+    let cap: Awaited<ReturnType<typeof session.gotoCapture>> | null = null;
+    let flight = "";
+    let flightSnippet = "";
     if (!videoData) {
-      // Surface everything we saw so we can adapt to Kick's current API.
-      const seen = cap.responses
-        .map((c) => `${c.status} ${c.url}`)
-        .slice(0, 15)
-        .join(" | ");
+      sseWrite(res, { type: "progress", count: 0, status: "API miss — loading VOD page…" });
+      cap = await session.gotoCapture(rawUrl, { settleMs: 4000 });
+      videoData = cap.responses.find(
+        (c) => c.status === 200 && looksLikeVideo(c.json),
+      )?.json as VideoData | undefined;
+      if (!videoData && cap.embedded) {
+        const f = findVideoInTree(cap.embedded);
+        if (f) videoData = f;
+      }
+      flight =
+        cap.embedded &&
+        typeof (cap.embedded as Record<string, unknown>)["flight"] === "string"
+          ? ((cap.embedded as Record<string, unknown>)["flight"] as string)
+          : "";
+      if (!videoData && flight) {
+        const r = extractVideoFromFlight(flight, parsed.videoId);
+        flightSnippet = r.rawSnippet;
+        if (r.data) videoData = r.data;
+      }
+    }
+
+    if (!videoData) {
+      const seen = cap
+        ? cap.responses.map((c) => `${c.status} ${c.url}`).slice(0, 12).join(" | ")
+        : "n/a";
       const embeddedKeys =
-        cap.embedded && typeof cap.embedded === "object"
+        cap && cap.embedded && typeof cap.embedded === "object"
           ? Object.keys(cap.embedded as object).join(",")
           : "none";
-      const html = cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 120);
-      // Find the uuid in flight to show the region around it (real video data).
+      const html = cap ? cap.htmlSnippet.replace(/\s+/g, " ").slice(0, 120) : "n/a";
       const uidx = flight.indexOf(parsed.videoId);
       const flightInfo = flight
         ? `flightLen=${flight.length} ${
             uidx >= 0
-              ? `near-uuid="${flight.slice(Math.max(0, uidx - 100), uidx + 300)}"`
+              ? `near-uuid="${flight.slice(Math.max(0, uidx - 80), uidx + 260)}"`
               : "uuid-not-in-flight"
           }`
         : "flight=none";
       sseWrite(res, {
         type: "error",
         message:
-          `Couldn't find Kick VOD metadata. nav=${cap.navStatus}${cap.navError ? ` navErr=${cap.navError}` : ""} ` +
-          `probes=[${probeResults.join(" | ") || "none"}] ` +
-          `videosList=${listDump || "n/a"} ` +
-          `title="${cap.title}" embedded=${embeddedKeys} ${flightInfo} ` +
-          `failed=${cap.failed.length ? cap.failed.slice(0, 4).join(" ; ") : "none"} ` +
-          `responses=${seen || "none"} html="${html}"`,
+          `Couldn't find Kick VOD metadata. nav=${cap ? cap.navStatus : "n/a"} ` +
+          `probes=[${probeResults.join(" | ") || "none"}] videosList=${listDump || "n/a"} ` +
+          `title="${cap ? cap.title : ""}" embedded=${embeddedKeys} ${flightInfo} ` +
+          `responses=${seen} html="${html}"`,
       });
       throw new Error("no-metadata");
     }
+    void flightSnippet;
 
     const channelSlug =
       videoData.channel?.slug ??
@@ -384,13 +372,10 @@ router.get("/kick-chat", async (req: Request, res: Response) => {
       throw new Error("no-duration");
     }
 
-    // ── Discover the real chat-replay endpoint by playing the VOD ────────
-    sseWrite(res, {
-      type: "progress",
-      count: 0,
-      status: "Playing VOD to discover the chat endpoint…",
-    });
-    const discoveredChat = await session.captureChatRequests(12);
+    // Chat endpoint discovery via playback needs the heavy player chunks (which
+    // we block to save bandwidth) and returned nothing anyway, so we go
+    // straight to the /messages API below.
+    const discoveredChat: string[] = [];
 
     // ── Step 2: page through chat replay in 2-min windows ────────────────
     const WINDOW = 120; // seconds per chunk request
