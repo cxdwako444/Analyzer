@@ -32,12 +32,14 @@ export async function fetchTwitchChatClient(
   videoId: string,
   onProgress: (count: number, status?: string) => void,
   signal?: AbortSignal,
+  onWarning?: (msg: string) => void,
 ): Promise<ApiMessage[]> {
   const messages: ApiMessage[] = [];
   let cursor: string | null = null;
   let hasNextPage = true;
   let page = 0;
   let errors = 0;
+  let stopReason = "completed normally";
   const seen = new Set<string>();
 
   onProgress(0, "Fetching directly from your device (no proxy)…");
@@ -77,12 +79,15 @@ export async function fetchTwitchChatClient(
     }
 
     if (resp.status === 429) {
-      if (messages.length > 0) break;
-      throw new Error("Twitch rate-limited your device. Wait a minute and try again.");
+      stopReason = `HTTP 429 (rate limited) after ${page} pages / ${messages.length} msgs`;
+      break;
     }
     if (!resp.ok) {
       errors++;
-      if (errors > 5) throw new Error(`Twitch returned HTTP ${resp.status}.`);
+      if (errors > 5) {
+        stopReason = `HTTP ${resp.status} repeatedly after ${page} pages`;
+        break;
+      }
       await sleep(1000 * errors);
       continue;
     }
@@ -92,26 +97,35 @@ export async function fetchTwitchChatClient(
     try {
       json = await resp.json();
     } catch {
-      throw new Error("Twitch returned a non-JSON response.");
+      stopReason = "non-JSON response";
+      break;
     }
 
-    const video = (
+    const root = (
       json as Array<{
+        errors?: Array<{ message?: string }>;
         data?: {
           video?: {
             comments?: { edges?: Edge[]; pageInfo?: { hasNextPage?: boolean } };
           } | null;
         };
       }>
-    )[0]?.data?.video;
+    )[0];
+    const gqlErrors = root?.errors;
+    const video = root?.data?.video;
 
     if (!video) {
-      if (messages.length > 0) break;
-      throw new Error("VOD not found, private, or deleted — check the URL.");
+      stopReason = `video=null at page ${page + 1}, msgs=${messages.length}${
+        gqlErrors ? ` · gqlErrors=${JSON.stringify(gqlErrors).slice(0, 200)}` : ""
+      }`;
+      break;
     }
 
     const edges = video.comments?.edges ?? [];
-    if (edges.length === 0) break;
+    if (edges.length === 0) {
+      stopReason = `empty edges at page ${page + 1}, msgs=${messages.length}`;
+      break;
+    }
 
     for (const e of edges) {
       const n = e.node;
@@ -122,21 +136,31 @@ export async function fetchTwitchChatClient(
       });
     }
 
-    hasNextPage = video.comments?.pageInfo?.hasNextPage ?? false;
+    const apiHasNext = video.comments?.pageInfo?.hasNextPage;
     const next = edges[edges.length - 1]?.cursor ?? null;
-    if (!next || seen.has(next)) {
+    page++;
+
+    if (apiHasNext === false) {
+      stopReason = `pageInfo.hasNextPage=false at page ${page}, msgs=${messages.length}, lastEdgeCursor=${next ? "present" : "null"}`;
+      hasNextPage = false;
+    } else if (!next) {
+      stopReason = `no cursor on last edge at page ${page}, msgs=${messages.length} (apiHasNext=${apiHasNext})`;
+      hasNextPage = false;
+    } else if (seen.has(next)) {
+      stopReason = `cursor repeated at page ${page}, msgs=${messages.length}`;
       hasNextPage = false;
     } else {
       seen.add(next);
       cursor = next;
     }
 
-    page++;
     const lastTs = messages[messages.length - 1]?.timestamp ?? 0;
     onProgress(messages.length, `Page ${page} · up to ${Math.floor(lastTs / 60)}m into the VOD`);
 
     await sleep(50);
   }
 
+  // Always surface why we stopped so we can diagnose short pulls.
+  onWarning?.(`Stopped: ${stopReason}`);
   return messages;
 }

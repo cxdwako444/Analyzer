@@ -25,7 +25,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v24 · 2026-06-21 · Twitch fetched in YOUR browser (no proxy/server)";
+const BUILD_VERSION = "v25 · 2026-06-21 · Twitch client fetch + stop-reason diagnostics";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -138,6 +138,7 @@ export default function App() {
           videoId,
           (count, status) => setTwitchProgress({ count, status }),
           ctrl.signal,
+          (msg) => setTwitchWarning(msg),
         );
 
         setTwitchProgress({ count: raw.length });
