@@ -13,6 +13,7 @@ function sleep(ms: number) {
 interface Edge {
   cursor?: string;
   node: {
+    id?: string;
     content_offset_seconds: number;
     commenter?: { display_name?: string };
     message?: { fragments?: Array<{ text?: string }> };
@@ -22,11 +23,10 @@ interface Edge {
 /**
  * Fetch a Twitch VOD's chat replay DIRECTLY from the user's browser.
  *
- * This runs client-side on purpose: the request comes from the user's own
- * (residential/mobile) IP, which Twitch trusts — unlike a datacenter/server IP,
- * which gets bot-checked after ~100 messages. Twitch's GraphQL endpoint allows
- * cross-origin browser calls (Access-Control-Allow-Origin: *), so no proxy or
- * backend is needed.
+ * Pages forward by content offset (re-querying at the last comment's
+ * timestamp), NOT by cursor — Twitch's cursor pagination returns empty edges
+ * here, capping at one page. Dedup + a small nudge handle dense chat so we walk
+ * the whole VOD. Runs client-side so the request comes from the user's own IP.
  */
 export async function fetchTwitchChatClient(
   videoId: string,
@@ -35,26 +35,24 @@ export async function fetchTwitchChatClient(
   onWarning?: (msg: string) => void,
 ): Promise<ApiMessage[]> {
   const messages: ApiMessage[] = [];
-  let cursor: string | null = null;
-  let hasNextPage = true;
+  const seenIds = new Set<string>();
+  let offset = 0; // content offset (seconds into the VOD) to query next
   let page = 0;
   let errors = 0;
-  let stopReason = "completed normally";
-  const seen = new Set<string>();
+  let emptyStreak = 0; // consecutive responses with no edges
+  let noNewStreak = 0; // consecutive responses that added nothing new
+  let stopReason = "reached end of VOD";
+  const MAX_PAGES = 8000; // safety guard
 
   onProgress(0, "Fetching directly from your device (no proxy)…");
 
-  while (hasNextPage) {
+  while (page < MAX_PAGES) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-
-    const variables = cursor
-      ? { videoID: videoId, cursor }
-      : { videoID: videoId, contentOffsetSeconds: 0 };
 
     const body = JSON.stringify([
       {
         operationName: "VideoCommentsByOffsetOrCursor",
-        variables,
+        variables: { videoID: videoId, contentOffsetSeconds: offset },
         extensions: {
           persistedQuery: { version: 1, sha256Hash: QUERY_HASH },
         },
@@ -79,13 +77,13 @@ export async function fetchTwitchChatClient(
     }
 
     if (resp.status === 429) {
-      stopReason = `HTTP 429 (rate limited) after ${page} pages / ${messages.length} msgs`;
+      stopReason = `rate limited (429) at ${messages.length} msgs`;
       break;
     }
     if (!resp.ok) {
       errors++;
       if (errors > 5) {
-        stopReason = `HTTP ${resp.status} repeatedly after ${page} pages`;
+        stopReason = `HTTP ${resp.status} repeatedly`;
         break;
       }
       await sleep(1000 * errors);
@@ -106,61 +104,79 @@ export async function fetchTwitchChatClient(
         errors?: Array<{ message?: string }>;
         data?: {
           video?: {
-            comments?: { edges?: Edge[]; pageInfo?: { hasNextPage?: boolean } };
+            comments?: { edges?: Edge[] };
           } | null;
         };
       }>
     )[0];
-    const gqlErrors = root?.errors;
     const video = root?.data?.video;
-
     if (!video) {
-      stopReason = `video=null at page ${page + 1}, msgs=${messages.length}${
-        gqlErrors ? ` · gqlErrors=${JSON.stringify(gqlErrors).slice(0, 200)}` : ""
-      }`;
-      break;
+      if (root?.errors) {
+        stopReason = `gqlErrors=${JSON.stringify(root.errors).slice(0, 160)}`;
+        break;
+      }
+      // No video at this offset — skip ahead in case it's a quiet gap.
+      emptyStreak++;
+      if (emptyStreak >= 3) {
+        stopReason = `video=null x${emptyStreak} at ${offset}s`;
+        break;
+      }
+      offset += 30;
+      continue;
     }
 
     const edges = video.comments?.edges ?? [];
     if (edges.length === 0) {
-      stopReason = `empty edges at page ${page + 1}, msgs=${messages.length}`;
-      break;
+      emptyStreak++;
+      if (emptyStreak >= 3) {
+        stopReason = `empty edges x${emptyStreak} near ${offset}s, msgs=${messages.length}`;
+        break;
+      }
+      offset += 30; // jump past a possible chat-free stretch
+      continue;
     }
+    emptyStreak = 0;
 
+    let maxTs = offset;
+    let newCount = 0;
     for (const e of edges) {
       const n = e.node;
-      messages.push({
-        timestamp: n.content_offset_seconds ?? 0,
-        user: n.commenter?.display_name ?? "",
-        text: (n.message?.fragments ?? []).map((f) => f.text ?? "").join(""),
-      });
+      const ts = n.content_offset_seconds ?? 0;
+      const user = n.commenter?.display_name ?? "";
+      const text = (n.message?.fragments ?? []).map((f) => f.text ?? "").join("");
+      const id = n.id ?? `${ts}|${user}|${text}`;
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        messages.push({ timestamp: ts, user, text });
+        newCount++;
+      }
+      if (ts > maxTs) maxTs = ts;
     }
 
-    const apiHasNext = video.comments?.pageInfo?.hasNextPage;
-    const next = edges[edges.length - 1]?.cursor ?? null;
     page++;
 
-    if (apiHasNext === false) {
-      stopReason = `pageInfo.hasNextPage=false at page ${page}, msgs=${messages.length}, lastEdgeCursor=${next ? "present" : "null"}`;
-      hasNextPage = false;
-    } else if (!next) {
-      stopReason = `no cursor on last edge at page ${page}, msgs=${messages.length} (apiHasNext=${apiHasNext})`;
-      hasNextPage = false;
-    } else if (seen.has(next)) {
-      stopReason = `cursor repeated at page ${page}, msgs=${messages.length}`;
-      hasNextPage = false;
+    // Advance. If the whole batch sat on the same second, nudge forward by 1s
+    // so we don't loop forever (dedup keeps us from re-counting).
+    offset = maxTs > offset ? maxTs : offset + 1;
+
+    if (newCount === 0) {
+      noNewStreak++;
+      if (noNewStreak >= 4) {
+        stopReason = `no new messages for ${noNewStreak} pages, msgs=${messages.length}`;
+        break;
+      }
     } else {
-      seen.add(next);
-      cursor = next;
+      noNewStreak = 0;
     }
 
-    const lastTs = messages[messages.length - 1]?.timestamp ?? 0;
-    onProgress(messages.length, `Page ${page} · up to ${Math.floor(lastTs / 60)}m into the VOD`);
+    onProgress(
+      messages.length,
+      `Page ${page} · up to ${Math.floor(offset / 60)}m into the VOD`,
+    );
 
-    await sleep(50);
+    await sleep(40);
   }
 
-  // Always surface why we stopped so we can diagnose short pulls.
-  onWarning?.(`Stopped: ${stopReason}`);
+  onWarning?.(`Stopped: ${stopReason} (${messages.length} msgs, ${page} pages)`);
   return messages;
 }
