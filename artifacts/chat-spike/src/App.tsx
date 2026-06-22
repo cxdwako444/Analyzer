@@ -16,7 +16,6 @@ import SpikeList from "./components/SpikeList";
 import ViralMoments from "./components/ViralMoments";
 import { parseChat, analyzeChat, buildMessagesFromApi } from "./lib/chatParser";
 import { streamFetch } from "./lib/sseStream";
-import { fetchTwitchChatClient } from "./lib/twitchClient";
 import type { AnalysisResult } from "./lib/chatParser";
 
 const BUCKET_SIZES = [5, 10, 15, 30, 60, 120];
@@ -25,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v28 · 2026-06-21 · Twitch cursor probe (why does paging dead-end?)";
+const BUILD_VERSION = "v29 · 2026-06-21 · Twitch integrity token via headless browser";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
@@ -132,13 +131,15 @@ export default function App() {
       setIsAnalyzing(false);
 
       try {
-        // Fetch Twitch chat DIRECTLY from the browser (residential/mobile IP) —
-        // no server, no proxy, no datacenter-IP bot-check.
-        const raw = await fetchTwitchChatClient(
-          videoId,
-          (count, status) => setTwitchProgress({ count, status }),
-          ctrl.signal,
-          (msg) => setTwitchWarning(msg),
+        // Backend opens a real browser on twitch.tv to obtain an integrity
+        // token (required for VOD pagination), then streams the chat back.
+        const raw = await streamFetch(
+          `/api/twitch-chat?videoId=${encodeURIComponent(videoId)}`,
+          {
+            onProgress: (count, status) => setTwitchProgress({ count, status }),
+            onWarning: (msg) => setTwitchWarning(msg),
+            signal: ctrl.signal,
+          },
         );
 
         setTwitchProgress({ count: raw.length });
