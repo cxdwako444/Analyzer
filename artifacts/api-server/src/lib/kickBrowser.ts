@@ -86,7 +86,12 @@ function toPlaywrightProxy(rawProxy: string | null | undefined) {
 }
 
 export async function openKickSession(
-  opts: { proxy?: string | null; primeUrl?: string } = {},
+  opts: {
+    proxy?: string | null;
+    primeUrl?: string;
+    blockScripts?: boolean;
+    primeSettleMs?: number;
+  } = {},
 ): Promise<KickBrowserSession> {
   // Dynamic import so a missing install doesn't crash the server at boot —
   // only the Kick route needs it. playwright-core has no bundled browser, so
@@ -145,6 +150,11 @@ export async function openKickSession(
     if (type === "image" || type === "font" || type === "media" || type === "stylesheet") {
       return route.abort();
     }
+    // Optionally drop scripts too (Twitch: we only need the origin + cookies +
+    // browser TLS fingerprint, not the whole SPA — keeps it fast and light).
+    if (opts.blockScripts && type === "script") {
+      return route.abort();
+    }
     if (
       /assets\.kick\.com\/.*\/static\//.test(url) ||
       /datadoghq|googlesyndication|google-analytics|googletagmanager|doubleclick|\/recaptcha\/|gpt\.js/.test(url)
@@ -156,14 +166,16 @@ export async function openKickSession(
 
   const page = await context.newPage();
 
-  // Load the priming page so the session has a real origin, cookies, and (for
-  // Twitch) an integrity token. Defaults to kick.com for Cloudflare clearance.
+  // Load the priming page so the session has a real origin, cookies, and a
+  // genuine browser TLS fingerprint. Wrapped so a slow/heavy page never hangs
+  // the whole request — we can still issue API calls from the origin.
   const primeUrl = opts.primeUrl ?? "https://kick.com/";
-  await page.goto(primeUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: 45_000,
-  });
-  await page.waitForTimeout(4000);
+  try {
+    await page.goto(primeUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  } catch {
+    /* proceed even if the page didn't fully load */
+  }
+  await page.waitForTimeout(opts.primeSettleMs ?? 4000);
 
   return {
     async fetchRaw(

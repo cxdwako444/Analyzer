@@ -24,7 +24,7 @@ type ResultTab = "timeline" | "virality";
 
 // BUILD_VERSION — bump this on EVERY change so the banner at the top of the
 // screen visibly confirms a new version is live after each deploy.
-const BUILD_VERSION = "v21 · 2026-06-21 · Twitch via real browser, no proxy";
+const BUILD_VERSION = "v22 · 2026-06-21 · Twitch light browser prime (no hang)";
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (

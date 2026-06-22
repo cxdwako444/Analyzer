@@ -70,8 +70,12 @@ router.get("/twitch-chat", async (req: Request, res: Response) => {
 
   let session: KickBrowserSession;
   try {
+    // Light prime: twitch.tv homepage with scripts/assets blocked — we only
+    // need a real browser origin + TLS fingerprint, not Twitch's heavy SPA.
     session = await openKickSession({
-      primeUrl: `https://www.twitch.tv/videos/${videoId}`,
+      primeUrl: "https://www.twitch.tv/",
+      blockScripts: true,
+      primeSettleMs: 1500,
     });
   } catch (err) {
     sseWrite(res, {
